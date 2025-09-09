@@ -161,8 +161,8 @@
 
 #include <optix.h>
 #include <vector_types.h>
-
-
+#include <cuda/GeometryData.h>
+#include <cuda/MaterialData.h>
 
 constexpr unsigned int RAY_TYPE_COUNT = 1;
 
@@ -256,7 +256,13 @@ struct MissData
 
 struct HitGroupData
 {
+    // Data for building SBT
+    GeometryData geometry_data;
+    MaterialData material_data;
+
+    float4* vertices;
     float3  emission_color;
     float3  diffuse_color;
-    float4* vertices;
+
+
 };

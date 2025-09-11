@@ -35,6 +35,7 @@
 
 #include <sutil/vec_math.h>
 #include <cuda/helpers.h>
+#include <texture_indirect_functions.h>
 
 extern "C" {
 __constant__ Params params;
@@ -337,6 +338,78 @@ extern "C" __global__ void __miss__radiance()
     storeMissRadiancePRD( prd );
 }
 
+template<typename T>
+__forceinline__ __device__ T sampleTexture(const MaterialData::Texture& texture, const float2 uv)
+{
+    // Assumes the caller checked that texture.object is valid.
+    const float2 UV = uv * texture.texcoord_scale;
+    const float2 rotation = texture.texcoord_rotation; // .x = sin, .y = cos
+    const float2 UV_trans = make_float2(dot(make_float2(rotation.y, rotation.x), UV),
+        dot(make_float2(-rotation.x, rotation.y), UV))
+        + texture.texcoord_offset;
+
+    return tex2D<T>(texture.tex, UV_trans.x, UV_trans.y);
+}
+
+__device__ float3 getBaseColor(const GeometryData::TriangleMesh& mesh, const MaterialData& material);
+
+// Get TRIANGLES' base color.
+// For the KHR_materials_unlit case, only the baseColor is required.
+__forceinline__ __device__ float3 getBaseColor(const GeometryData::TriangleMesh& mesh,
+    const MaterialData& material)
+{
+    const unsigned int prim_idx = optixGetPrimitiveIndex();
+
+    // INDICES 
+    uint3 tri;
+    if (mesh.indices)
+    {
+        tri = make_uint3(mesh.positions[prim_idx]);
+    }
+    else
+    {
+        const unsigned int base_idx = prim_idx * 3;
+
+        tri = make_uint3(base_idx, base_idx + 1, base_idx + 2);
+    }
+
+    const float2 barys = optixGetTriangleBarycentrics(); // .x = beta, .y = gamma
+    const float  barys_a = 1.0f - barys.x - barys.y;       // alpha
+
+    float3 baseColor = make_float3(material.pbr.base_color);
+
+    // COLOR_0
+    if (mesh.colors)
+    {
+        // If there are color attributes the alpha modulates the opacity.
+        baseColor *= barys_a * make_float3(mesh.colors[tri.x]) +
+            barys.x * make_float3(mesh.colors[tri.y]) +
+            barys.y * make_float3(mesh.colors[tri.z]);
+    }
+
+    // If the baseColor has a texture the alpha in there modulates the opacity.
+    if (material.pbr.base_color_tex)
+    {
+        // No need to calculate texture coordinates when there is no baseColorTexture 
+        // and only one of the two supported texture coordinates is required here.
+        // TEXCOORD_0 or TEXCOORD_1
+        const int j = material.pbr.base_color_tex.texcoord;
+
+        float2 texcoord = make_float2(0.0f);
+
+        if (mesh.texcoords[j])
+        {
+            // Texture coordinate of the hit point.
+            texcoord = barys_a * mesh.texcoords[j][tri.x] +
+                barys.x * mesh.texcoords[j][tri.y] +
+                barys.y * mesh.texcoords[j][tri.z];
+        }
+
+        baseColor *= make_float3(sampleTexture<float4>(material.pbr.base_color_tex, texcoord)); // sRGB
+    }
+
+    return baseColor;
+}
 
 extern "C" __global__ void __closesthit__radiance()
 {

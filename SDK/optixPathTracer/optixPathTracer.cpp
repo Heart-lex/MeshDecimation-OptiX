@@ -572,12 +572,7 @@ void createSBT(PathTracerState& state, const sutil::Scene& scene)
     ));
 
     CUdeviceptr  d_hitgroup_records;
-    const size_t hitgroup_record_size = sizeof(HitGroupRecord);
-    CUDA_CHECK(cudaMalloc(
-        reinterpret_cast<void**>(&d_hitgroup_records),
-        hitgroup_record_size * RAY_TYPE_COUNT * MAT_COUNT
-    ));
-
+    
 	// Create hitgroup records for each mesh in the scene
     std::vector<HitGroupRecord> hitgroup_records;
     for (const auto& instance : scene.instances())
@@ -745,7 +740,6 @@ int main(int argc, char* argv[])
         // Set up OptiX state
         //
         createContext(state);
-        buildMeshAccel(state, model);
         createModule(state);
         createProgramGroups(state);
         createPipeline(state);

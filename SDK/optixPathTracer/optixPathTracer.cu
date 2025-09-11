@@ -417,14 +417,24 @@ extern "C" __global__ void __closesthit__radiance()
 
     HitGroupData* rt_data = (HitGroupData*)optixGetSbtDataPointer();
 
+	// Geometry and material data
+	const GeometryData::TriangleMesh& mesh = rt_data->geometry_data.getTriangleMesh();
+	const MaterialData& material = rt_data->material_data;
+
     const int    prim_idx        = optixGetPrimitiveIndex();
     const float3 ray_dir         = optixGetWorldRayDirection();
     const int    vert_idx_offset = prim_idx*3;
 
-    const float3 v0   = make_float3( rt_data->vertices[ vert_idx_offset+0 ] );
-    const float3 v1   = make_float3( rt_data->vertices[ vert_idx_offset+1 ] );
-    const float3 v2   = make_float3( rt_data->vertices[ vert_idx_offset+2 ] );
-    const float3 N_0  = normalize( cross( v1-v0, v2-v0 ) );
+    //const float3 v0   = make_float3( rt_data->vertices[ vert_idx_offset+0 ] );
+    //const float3 v1   = make_float3( rt_data->vertices[ vert_idx_offset+1 ] );
+    //const float3 v2   = make_float3( rt_data->vertices[ vert_idx_offset+2 ] );
+    //const float3 N_0  = normalize( cross( v1-v0, v2-v0 ) );
+
+    const float3 v0 = make_float3(mesh.indices[vert_idx_offset + 0]);
+    const float3 v1 = make_float3(mesh.indices[vert_idx_offset + 1]);
+    const float3 v2 = make_float3(mesh.indices[vert_idx_offset + 2]);
+    const float3 N_0 = normalize(cross(v1 - v0, v2 - v0));
+
 
     const float3 N    = faceforward( N_0, -ray_dir, N_0 );
     const float3 P    = optixGetWorldRayOrigin() + optixGetRayTmax()*ray_dir;
@@ -432,7 +442,7 @@ extern "C" __global__ void __closesthit__radiance()
     RadiancePRD prd = loadClosesthitRadiancePRD();
 
     if( prd.depth == 0 )
-        prd.emitted = rt_data->emission_color;
+        prd.emitted = getBaseColor(mesh, material);
     else
         prd.emitted = make_float3( 0.0f );
 
@@ -448,7 +458,7 @@ extern "C" __global__ void __closesthit__radiance()
         prd.direction = w_in;
         prd.origin    = P;
 
-        prd.attenuation *= rt_data->diffuse_color;
+        prd.attenuation *= material.emissive_factor;
     }
 
     const float z1 = rnd(seed);

@@ -66,6 +66,7 @@
 #define STB_IMAGE_IMPLEMENTATION
 #define STB_IMAGE_WRITE_IMPLEMENTATION
 #include <tinygltf/tiny_gltf.h>
+#include <sutil/Scene.h>
 
 bool resize_dirty = false;
 bool minimized = false;
@@ -247,7 +248,7 @@ void printUsageAndExit(const char* argv0)
 }
 
 
-void initLaunchParams(PathTracerState& state)
+void initLaunchParams(PathTracerState& state, const sutil::Scene& scene)
 {
     CUDA_CHECK(cudaMalloc(
         reinterpret_cast<void**>(&state.params.accum_buffer),
@@ -263,7 +264,7 @@ void initLaunchParams(PathTracerState& state)
     state.params.light.v1 = make_float3(0.0f, 0.0f, 105.0f);
     state.params.light.v2 = make_float3(-130.0f, 0.0f, 0.0f);
     state.params.light.normal = normalize(cross(state.params.light.v1, state.params.light.v2));
-    state.params.handle = state.gas_handle;
+    state.params.handle = scene.traversableHandle();
 
     CUDA_CHECK(cudaStreamCreate(&state.stream));
     CUDA_CHECK(cudaMalloc(reinterpret_cast<void**>(&state.d_params), sizeof(Params)));
@@ -359,12 +360,9 @@ static void context_log_cb(unsigned int level, const char* tag, const char* mess
 }
 
 
-void initCameraState()
+void initCameraState(const sutil::Scene& scene)
 {
-    camera.setEye(make_float3(278.0f, 273.0f, -900.0f));
-    camera.setLookat(make_float3(278.0f, 273.0f, 330.0f));
-    camera.setUp(make_float3(0.0f, 1.0f, 0.0f));
-    camera.setFovY(35.0f);
+    camera = scene.camera();
     camera_changed = true;
 
     trackball.setCamera(&camera);
@@ -541,7 +539,7 @@ void createPipeline(PathTracerState& state)
 }
 
 
-void createSBT(PathTracerState& state)
+void createSBT(PathTracerState& state, const sutil::Scene& scene)
 {
     CUdeviceptr  d_raygen_record;
     const size_t raygen_record_size = sizeof(RayGenRecord);
@@ -650,6 +648,7 @@ int main(int argc, char* argv[])
     // Parse command line options
     //
     std::string outfile;
+    std::string infile = sutil::sampleDataFilePath("UnrealLevel/Lvl_FirstPerson.gltf");
 
     for (int i = 1; i < argc; ++i)
     {
@@ -691,7 +690,12 @@ int main(int argc, char* argv[])
 
     try
     {
-        initCameraState();
+        sutil::Scene scene;
+        sutil::loadScene(infile, scene);
+        scene.finalize(false, RAY_TYPE_COUNT);
+
+        OPTIX_CHECK(optixInit()); // Need to initialize function table
+        initCameraState(scene);
 
         //
         // Set up OptiX state
@@ -701,8 +705,8 @@ int main(int argc, char* argv[])
         createModule(state);
         createProgramGroups(state);
         createPipeline(state);
-        createSBT(state);
-        initLaunchParams(state);
+        createSBT(state, scene);
+        initLaunchParams(state, scene);
 
 
         if (outfile.empty())

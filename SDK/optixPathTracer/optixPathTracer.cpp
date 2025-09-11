@@ -578,36 +578,80 @@ void createSBT(PathTracerState& state, const sutil::Scene& scene)
         hitgroup_record_size * RAY_TYPE_COUNT * MAT_COUNT
     ));
 
-    HitGroupRecord hitgroup_records[RAY_TYPE_COUNT * MAT_COUNT];
-    for (int i = 0; i < MAT_COUNT; ++i)
+	// Create hitgroup records for each mesh in the scene
+    std::vector<HitGroupRecord> hitgroup_records;
+    for (const auto& instance : scene.instances())
     {
+        const auto mesh = scene.meshes()[instance->mesh_idx];
+        for (size_t i = 0; i < mesh->material_idx.size(); ++i)
         {
-            const int sbt_idx = i * RAY_TYPE_COUNT + 0;  // SBT for radiance ray-type for ith material
+            HitGroupRecord rec = {};
+            OPTIX_CHECK(optixSbtRecordPackHeader(state.radiance_hit_group, &rec));
+            GeometryData::TriangleMesh triangle_mesh = {};
+            triangle_mesh.normals = mesh->normals[i];
+            triangle_mesh.positions = mesh->positions[i];
+            for (size_t j = 0; j < GeometryData::num_texcoords; ++j)
+                triangle_mesh.texcoords[j] = mesh->texcoords[j][i];
+            triangle_mesh.colors = mesh->colors[i];
+            triangle_mesh.indices = mesh->indices[i];
+            rec.data.geometry_data.setTriangleMesh(triangle_mesh);
 
-            OPTIX_CHECK(optixSbtRecordPackHeader(state.radiance_hit_group, &hitgroup_records[sbt_idx]));
-            hitgroup_records[sbt_idx].data.emission_color = g_emission_colors[i];
-            hitgroup_records[sbt_idx].data.diffuse_color = g_diffuse_colors[i];
-            hitgroup_records[sbt_idx].data.vertices = reinterpret_cast<float4*>(state.d_vertices);
+            const int32_t mat_idx = mesh->material_idx[i];
+            if (mat_idx >= 0)
+                rec.data.material_data = scene.materials()[mat_idx];
+            else
+                rec.data.material_data = MaterialData();
+            hitgroup_records.push_back(rec);
+
+
+			// TODO: Create occlusion hit group records if needed
+            //OPTIX_CHECK(optixSbtRecordPackHeader(state.radiance_hit_group, &rec));
         }
-
-        // Note that we do not need to use any program groups for occlusion
-        // rays as they are traced as 'probe rays' with no shading.
     }
+
+    const size_t hitgroup_record_size = sizeof(HitGroupRecord);
+    CUDA_CHECK(cudaMalloc(
+        reinterpret_cast<void**>(&d_hitgroup_records),
+        hitgroup_record_size * RAY_TYPE_COUNT * hitgroup_records.size()
+    ));
 
     CUDA_CHECK(cudaMemcpy(
         reinterpret_cast<void*>(d_hitgroup_records),
-        hitgroup_records,
-        hitgroup_record_size * RAY_TYPE_COUNT * MAT_COUNT,
+        hitgroup_records.data(),
+        hitgroup_record_size * RAY_TYPE_COUNT * hitgroup_records.size(),
         cudaMemcpyHostToDevice
     ));
+
+    //HitGroupRecord hitgroup_records[RAY_TYPE_COUNT * MAT_COUNT];
+    //for (int i = 0; i < MAT_COUNT; ++i)
+    //{
+    //    {
+    //        const int sbt_idx = i * RAY_TYPE_COUNT + 0;  // SBT for radiance ray-type for ith material
+
+    //        OPTIX_CHECK(optixSbtRecordPackHeader(state.radiance_hit_group, &hitgroup_records[sbt_idx]));
+    //        hitgroup_records[sbt_idx].data.emission_color = g_emission_colors[i];
+    //        hitgroup_records[sbt_idx].data.diffuse_color = g_diffuse_colors[i];
+    //        hitgroup_records[sbt_idx].data.vertices = reinterpret_cast<float4*>(state.d_vertices);
+    //    }
+
+    //    // Note that we do not need to use any program groups for occlusion
+    //    // rays as they are traced as 'probe rays' with no shading.
+    //}
+
+    //CUDA_CHECK(cudaMemcpy(
+    //    reinterpret_cast<void*>(d_hitgroup_records),
+    //    hitgroup_records.data(),
+    //    hitgroup_record_size * RAY_TYPE_COUNT * hitgroup_records.size(),
+    //    cudaMemcpyHostToDevice
+    //));
 
     state.sbt.raygenRecord = d_raygen_record;
     state.sbt.missRecordBase = d_miss_records;
     state.sbt.missRecordStrideInBytes = static_cast<uint32_t>(miss_record_size);
     state.sbt.missRecordCount = RAY_TYPE_COUNT;
     state.sbt.hitgroupRecordBase = d_hitgroup_records;
-    state.sbt.hitgroupRecordStrideInBytes = static_cast<uint32_t>(hitgroup_record_size);
-    state.sbt.hitgroupRecordCount = RAY_TYPE_COUNT * MAT_COUNT;
+    state.sbt.hitgroupRecordStrideInBytes = static_cast<unsigned int>(hitgroup_record_size);
+    state.sbt.hitgroupRecordCount = static_cast<unsigned int> (hitgroup_records.size());
 }
 
 

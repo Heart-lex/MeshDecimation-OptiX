@@ -338,6 +338,23 @@ extern "C" __global__ void __miss__radiance()
     storeMissRadiancePRD( prd );
 }
 
+// Compute a weight based on distance and radiance for a given hit.
+__forceinline__ __device__ float computeWeight(float distance, float3 radiance)
+{
+    // Avoid division by zero or very small distances
+    const float minDistance = 1e-3f;
+    float safeDistance = fmaxf(distance, minDistance);
+
+    // Compute luminance (perceptual brightness) from RGB radiance
+    float luminance = 0.2126f * radiance.x + 0.7152f * radiance.y + 0.0722f * radiance.z;
+
+    // Weight: higher for closer and brighter hits.
+    float weight = luminance / (safeDistance * safeDistance);
+
+    // Clamp to avoid extreme values
+    return fminf(weight, 1);
+}
+
 template<typename T>
 __forceinline__ __device__ T sampleTexture(const MaterialData::Texture& texture, const float2 uv)
 {

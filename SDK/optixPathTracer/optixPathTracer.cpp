@@ -81,6 +81,7 @@ int32_t mouse_button = -1;
 
 int32_t samples_per_launch = 16;
 
+bool weight_accumulation = false;
 //------------------------------------------------------------------------------
 //
 // Local types
@@ -198,7 +199,9 @@ static void keyCallback(GLFWwindow* window, int32_t key, int32_t /*scancode*/, i
     }
     else if (key == GLFW_KEY_G)
     {
-        // toggle UI draw
+		// Toggle triange weight accumulation
+        weight_accumulation = !weight_accumulation;
+        std::cout << "Triangle weight accumulation " << (weight_accumulation ? "enabled" : "disabled") << std::endl;
     }
 }
 
@@ -771,6 +774,11 @@ int main(int argc, char* argv[])
 
                 do
                 {
+                    if (weight_accumulation)
+                        state.params.accumulate_weights = true;
+                    else
+						state.params.accumulate_weights = false;
+
                     auto t0 = std::chrono::steady_clock::now();
                     glfwPollEvents();
 

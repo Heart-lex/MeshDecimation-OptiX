@@ -82,6 +82,7 @@ int32_t mouse_button = -1;
 int32_t samples_per_launch = 16;
 
 bool weight_accumulation = false;
+
 //------------------------------------------------------------------------------
 //
 // Local types
@@ -238,6 +239,15 @@ void initLaunchParams(PathTracerState& state, const sutil::Scene& scene)
         reinterpret_cast<void**>(&state.params.accum_buffer),
         state.params.width * state.params.height * sizeof(float4)
     ));
+
+	// Allocate space for one float weight per triangle in the scene
+    CUDA_CHECK(cudaMalloc(
+        reinterpret_cast<void**>(&state.params.triangle_weights),
+        state.params.scene_triangle_count * sizeof(float)
+    ));
+
+    state.params.accumulate_weights = true;
+
     state.params.frame_buffer = nullptr;  // Will be set when output buffer is mapped
 
     state.params.samples_per_launch = samples_per_launch;
@@ -567,6 +577,8 @@ void createSBT(PathTracerState& state, const sutil::Scene& scene)
 
     CUdeviceptr  d_hitgroup_records;
     
+    state.params.scene_triangle_count = 0u;
+    
 	// Create hitgroup records for each mesh in the scene
     std::vector<HitGroupRecord> hitgroup_records;
     for (const auto& instance : scene.instances())
@@ -585,6 +597,9 @@ void createSBT(PathTracerState& state, const sutil::Scene& scene)
             triangle_mesh.indices = mesh->indices[i];
             rec.data.geometry_data.setTriangleMesh(triangle_mesh);
 
+			// Count mesh triangles and add it to the total number of triangles
+			state.params.scene_triangle_count += mesh->indices[i].count / 3;
+
             const int32_t mat_idx = mesh->material_idx[i];
             if (mat_idx >= 0)
                 rec.data.material_data = scene.materials()[mat_idx];
@@ -597,6 +612,8 @@ void createSBT(PathTracerState& state, const sutil::Scene& scene)
             //OPTIX_CHECK(optixSbtRecordPackHeader(state.radiance_hit_group, &rec));
         }
     }
+
+	std::cout << "Total number of triangles in the scene: " << state.params.scene_triangle_count << std::endl;
 
     const size_t hitgroup_record_size = sizeof(HitGroupRecord);
     CUDA_CHECK(cudaMalloc(

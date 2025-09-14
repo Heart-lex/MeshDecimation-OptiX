@@ -321,6 +321,15 @@ extern "C" __global__ void __raygen__rg()
     }
     params.accum_buffer[ image_index ] = make_float4( accum_color, 1.0f);
     params.frame_buffer[ image_index ] = make_color ( accum_color );
+
+    if (idx.x == 0 && idx.y == 0 && params.accumulate_weights)
+    {
+        for (size_t i = 0; i < params.scene_triangle_count; i++)
+        {
+            printf("Triangle [%llu] : %.2f\n\n", i, params.triangle_weights[i]);
+        }
+}
+
 }
 
 
@@ -511,6 +520,11 @@ extern "C" __global__ void __closesthit__radiance()
 
     prd.radiance = light.emission * weight;
     prd.done     = false;
+
+	if (params.accumulate_weights && params.agent.step_count < params.agent.max_steps)
+    {
+        params.triangle_weights[prim_idx] += computeWeight(length(prd.origin - P), make_float3(1.f));
+    }
 
     storeClosesthitRadiancePRD( prd );
 }

@@ -245,16 +245,20 @@ struct Params
     unsigned int width;
     unsigned int height;
     unsigned int samples_per_launch;
+    unsigned int scene_triangle_count;
 
     float3       eye;
     float3       U;
     float3       V;
     float3       W;
 
+	float* triangle_weights; // one float weight per triangle in the scene   
+
     ParallelogramLight     light; // TODO: make light list
     OptixTraversableHandle handle;
     Agent agent;
     bool agent_mode;
+	bool accumulate_weights;
 };
 
 

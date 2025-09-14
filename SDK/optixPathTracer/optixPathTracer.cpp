@@ -99,25 +99,6 @@ typedef Record<RayGenData>   RayGenRecord;
 typedef Record<MissData>     MissRecord;
 typedef Record<HitGroupData> HitGroupRecord;
 
-
-struct Vertex
-{
-    float x, y, z, pad;
-};
-
-
-struct IndexedTriangle
-{
-    uint32_t v1, v2, v3, pad;
-};
-
-
-struct Instance
-{
-    float transform[12];
-};
-
-
 struct PathTracerState
 {
     OptixDeviceContext context = 0;

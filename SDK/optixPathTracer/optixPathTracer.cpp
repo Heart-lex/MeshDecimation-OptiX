@@ -576,7 +576,7 @@ void createSBT(PathTracerState& state, const sutil::Scene& scene)
     ));
 
     CUdeviceptr  d_hitgroup_records;
-    
+
     state.params.scene_triangle_count = 0u;
     
 	// Create hitgroup records for each mesh in the scene
@@ -609,7 +609,6 @@ void createSBT(PathTracerState& state, const sutil::Scene& scene)
 
 
 			// TODO: Create occlusion hit group records if needed
-            //OPTIX_CHECK(optixSbtRecordPackHeader(state.radiance_hit_group, &rec));
         }
     }
 
@@ -627,29 +626,6 @@ void createSBT(PathTracerState& state, const sutil::Scene& scene)
         hitgroup_record_size * RAY_TYPE_COUNT * hitgroup_records.size(),
         cudaMemcpyHostToDevice
     ));
-
-    //HitGroupRecord hitgroup_records[RAY_TYPE_COUNT * MAT_COUNT];
-    //for (int i = 0; i < MAT_COUNT; ++i)
-    //{
-    //    {
-    //        const int sbt_idx = i * RAY_TYPE_COUNT + 0;  // SBT for radiance ray-type for ith material
-
-    //        OPTIX_CHECK(optixSbtRecordPackHeader(state.radiance_hit_group, &hitgroup_records[sbt_idx]));
-    //        hitgroup_records[sbt_idx].data.emission_color = g_emission_colors[i];
-    //        hitgroup_records[sbt_idx].data.diffuse_color = g_diffuse_colors[i];
-    //        hitgroup_records[sbt_idx].data.vertices = reinterpret_cast<float4*>(state.d_vertices);
-    //    }
-
-    //    // Note that we do not need to use any program groups for occlusion
-    //    // rays as they are traced as 'probe rays' with no shading.
-    //}
-
-    //CUDA_CHECK(cudaMemcpy(
-    //    reinterpret_cast<void*>(d_hitgroup_records),
-    //    hitgroup_records.data(),
-    //    hitgroup_record_size * RAY_TYPE_COUNT * hitgroup_records.size(),
-    //    cudaMemcpyHostToDevice
-    //));
 
     state.sbt.raygenRecord = d_raygen_record;
     state.sbt.missRecordBase = d_miss_records;
@@ -698,7 +674,7 @@ int main(int argc, char* argv[])
     // Parse command line options
     //
     std::string outfile;
-    std::string infile = sutil::sampleDataFilePath("UnrealLevel/Lvl_FirstPerson.gltf");
+    std::string infile = sutil::sampleDataFilePath("Cube/cube.gltf");
 
     for (int i = 1; i < argc; ++i)
     {

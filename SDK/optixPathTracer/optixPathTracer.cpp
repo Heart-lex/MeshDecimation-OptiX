@@ -356,6 +356,16 @@ void initCameraState(const sutil::Scene& scene)
     trackball.setGimbalLock(true);
 }
 
+void initAgent(PathTracerState& state)
+{
+    state.params.agent.camera_position = make_float3(0.0f, 0.0f, 0.0f);
+    state.params.agent.direction = make_float3(0.0f, 0.0f, -1.0f);
+    state.params.agent.position = make_float3(0.0f, 20.0f, 0.0f);
+    state.params.agent.max_steps = 10;
+	state.params.agent.march_distance = 0.2f; // 20% of the way to the ray target each step
+    state.params.agent.fov = 90.0f;
+    state.params.agent_mode = true;
+}
 
 void createContext(PathTracerState& state)
 {
@@ -717,6 +727,9 @@ int main(int argc, char* argv[])
         OPTIX_CHECK(optixInit()); // Need to initialize function table
         initCameraState(scene);
 
+        Agent agent;
+
+		initAgent(state);
         //
         // Set up OptiX state
         //

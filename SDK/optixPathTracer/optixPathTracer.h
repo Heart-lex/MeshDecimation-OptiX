@@ -223,6 +223,19 @@ struct ParallelogramLight
     float3 emission;
 };
 
+struct Agent
+{
+    float3 position;
+    float3 direction;
+
+    float3 camera_position;
+	float fov;
+    int max_steps;
+    int step_count;
+	float march_distance;
+
+};
+
 
 struct Params
 {
@@ -240,6 +253,8 @@ struct Params
 
     ParallelogramLight     light; // TODO: make light list
     OptixTraversableHandle handle;
+    Agent agent;
+    bool agent_mode;
 };
 
 

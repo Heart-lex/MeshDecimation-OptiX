@@ -263,6 +263,54 @@ __forceinline__ __device__ float distance(const float3& a, const float3& b) {
 // Helper functions for agent visualization
 //
 //------------------------------------------------------------------------------
+
+// World to screen coordinate transformation
+__forceinline__ __device__ float3 worldToScreen(const float3& world_pos) {
+    // Get camera parameters from params
+    const float3 eye = params.eye;
+    const float3 U = params.U;
+    const float3 V = params.V;
+    const float3 W = params.W;
+
+    // Transform world position to camera space
+    float3 cam_space = world_pos - eye;
+
+    // Project onto camera plane
+    float3 projected = make_float3(
+        dot(cam_space, U),
+        dot(cam_space, V),
+        dot(cam_space, W)
+    );
+
+    // Avoid division by zero
+    if (fabsf(projected.z) < 1e-6f) {
+        return make_float3(-1.0f, -1.0f, -1.0f); // Invalid screen position
+    }
+
+    // Perspective projection
+    float inv_z = 1.0f / projected.z;
+    float screen_x = projected.x * inv_z;
+    float screen_y = projected.y * inv_z;
+
+    // Convert to screen coordinates (0 to width/height)
+    float pixel_x = (screen_x + 1.0f) * 0.5f * params.width;
+    float pixel_y = (1.0f - screen_y) * 0.5f * params.height; // Flip Y for screen coordinates
+
+    return make_float3(pixel_x, pixel_y, projected.z);
+}
+
+// Check if a world position is visible on screen
+__forceinline__ __device__ bool isOnScreen(const float3& world_pos) {
+    float3 screen_pos = worldToScreen(world_pos);
+
+    // Check if behind camera
+    if (screen_pos.z <= 0.0f) return false;
+
+    // Check if within screen bounds
+    return (screen_pos.x >= 0.0f && screen_pos.x < params.width &&
+        screen_pos.y >= 0.0f && screen_pos.y < params.height);
+}
+
 // Cast a ray and return hit distance
 __device__ float castAgentRay(const float3& origin, const float3& direction, float max_distance = 1000.0f) {
     bool hit = traceOcclusion(
@@ -353,28 +401,79 @@ extern "C" __global__ void __raygen__rg()
     const uint3  idx = optixGetLaunchIndex();
     const int    subframe_index = params.subframe_index;
 
+    // Agent logic - run once per frame (only for thread 0,0)
+    if (params.agent_mode && idx.x == 0 && idx.y == 0) {
+        if (params.agent.step_count < params.agent.max_steps) {
+            // Perform 360-degree perception scan
+            agentPerceptionScan(params.agent);
+
+            // Move agent
+            moveAgent(params.agent);
+        }
+    } // End of agent logic
+
     unsigned int seed = tea<4>( idx.y*w + idx.x, subframe_index );
 
     float3 result = make_float3( 0.0f );
+
+    // Agent visualization (before main rendering loop)
+    bool is_agent_pixel = false;
+    if (params.agent_mode) {
+        float3 agent_screen_pos = worldToScreen(params.agent.position);
+
+        // Check if agent is visible on screen
+        if (isOnScreen(params.agent.position)) {
+            float pixel_distance = distance(
+                make_float2(static_cast<float>(idx.x), static_cast<float>(idx.y)),
+                make_float2(agent_screen_pos.x, agent_screen_pos.y)
+            );
+
+            // If current pixel is within agent marker radius
+            if (pixel_distance < 5.0f) {
+                is_agent_pixel = true;
+                result = make_float3(1.0f, 0.0f, 0.0f); // Red marker for agent
+            }
+
+            // Draw agent direction indicator
+            float3 agent_look_pos = params.agent.position + params.agent.direction * 2.0f;
+            float3 look_screen_pos = worldToScreen(agent_look_pos);
+
+            if (isOnScreen(agent_look_pos)) {
+                float look_distance = distance(
+                    make_float2(static_cast<float>(idx.x), static_cast<float>(idx.y)),
+                    make_float2(look_screen_pos.x, look_screen_pos.y)
+                );
+
+                if (look_distance < 2.0f) {
+                    is_agent_pixel = true;
+                    result = make_float3(0.0f, 1.0f, 0.0f); // Green marker for direction
+                }
+            }
+        }
+    }
+
+    // Only do normal rendering if this isn't an agent marker pixel
+    if (!is_agent_pixel)
+    {
     int i = params.samples_per_launch;
     do
     {
         // The center of each pixel is at fraction (0.5,0.5)
-        const float2 subpixel_jitter = make_float2( rnd( seed ), rnd( seed ) );
+            const float2 subpixel_jitter = make_float2(rnd(seed), rnd(seed));
 
         const float2 d = 2.0f * make_float2(
-                ( static_cast<float>( idx.x ) + subpixel_jitter.x ) / static_cast<float>( w ),
-                ( static_cast<float>( idx.y ) + subpixel_jitter.y ) / static_cast<float>( h )
+                (static_cast<float>(idx.x) + subpixel_jitter.x) / static_cast<float>(w),
+                (static_cast<float>(idx.y) + subpixel_jitter.y) / static_cast<float>(h)
                 ) - 1.0f;
-        float3 ray_direction = normalize(d.x*U + d.y*V + W);
-        float3 ray_origin    = eye;
+            float3 ray_direction = normalize(d.x * U + d.y * V + W);
+            float3 ray_origin = eye;
 
         RadiancePRD prd;
-        prd.attenuation  = make_float3(1.f);
-        prd.seed         = seed;
-        prd.depth        = 0;
+            prd.attenuation = make_float3(1.f);
+            prd.seed = seed;
+            prd.depth = 0;
 
-        for( ;; )
+            for (;; )
         {
             traceRadiance(
                 params.handle,
@@ -382,34 +481,37 @@ extern "C" __global__ void __raygen__rg()
                 ray_direction,
                 0.01f,  // tmin       // TODO: smarter offset
                 1e16f,  // tmax
-                prd );
+                    prd);
 
             result += prd.emitted;
             result += prd.radiance * prd.attenuation;
 
-            const float p = dot( prd.attenuation, make_float3( 0.30f, 0.59f, 0.11f ) );
-            const bool done = prd.done  || rnd( prd.seed ) > p;
-            if( done )
+                const float p = dot(prd.attenuation, make_float3(0.30f, 0.59f, 0.11f));
+                const bool done = prd.done || rnd(prd.seed) > p;
+                if (done)
                 break;
             prd.attenuation /= p;
 
-            ray_origin    = prd.origin;
+                ray_origin = prd.origin;
             ray_direction = prd.direction;
 
             ++prd.depth;
         }
-    }
+        } while (--i);
     while( --i );
 
     const uint3    launch_index = optixGetLaunchIndex();
-    const unsigned int image_index  = launch_index.y * params.width + launch_index.x;
-    float3         accum_color  = result / static_cast<float>( params.samples_per_launch );
+        const unsigned int image_index = launch_index.y * params.width + launch_index.x;
+        float3         accum_color = result / static_cast<float>(params.samples_per_launch);
 
-    if( subframe_index > 0 )
+        if (subframe_index > 0)
     {
-        const float                 a = 1.0f / static_cast<float>( subframe_index+1 );
-        const float3 accum_color_prev = make_float3( params.accum_buffer[ image_index ]);
-        accum_color = lerp( accum_color_prev, accum_color, a );
+            const float                 a = 1.0f / static_cast<float>(subframe_index + 1);
+            const float3 accum_color_prev = make_float3(params.accum_buffer[image_index]);
+            accum_color = lerp(accum_color_prev, accum_color, a);
+        }
+        params.accum_buffer[image_index] = make_float4(accum_color, 1.0f);
+        params.frame_buffer[image_index] = make_color(accum_color);
     }
     params.accum_buffer[ image_index ] = make_float4( accum_color, 1.0f);
     params.frame_buffer[ image_index ] = make_color ( accum_color );

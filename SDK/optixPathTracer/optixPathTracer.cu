@@ -328,7 +328,7 @@ extern "C" __global__ void __raygen__rg()
         {
             printf("Triangle [%llu] : %.2f\n\n", i, params.triangle_weights[i]);
         }
-}
+	}
 
 }
 
@@ -450,11 +450,6 @@ extern "C" __global__ void __closesthit__radiance()
     const int    prim_idx        = optixGetPrimitiveIndex();
     const float3 ray_dir         = optixGetWorldRayDirection();
     const int    vert_idx_offset = prim_idx*3;
-
-    //const float3 v0   = make_float3( rt_data->vertices[ vert_idx_offset+0 ] );
-    //const float3 v1   = make_float3( rt_data->vertices[ vert_idx_offset+1 ] );
-    //const float3 v2   = make_float3( rt_data->vertices[ vert_idx_offset+2 ] );
-    //const float3 N_0  = normalize( cross( v1-v0, v2-v0 ) );
 
     const float3 v0 = make_float3(mesh.indices[vert_idx_offset + 0]);
     const float3 v1 = make_float3(mesh.indices[vert_idx_offset + 1]);

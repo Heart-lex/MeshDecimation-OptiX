@@ -243,6 +243,98 @@ static __forceinline__ __device__ bool traceOcclusion(
     return optixHitObjectIsHit();
 }
 
+// Distance function for 2D points
+__forceinline__ __device__ float distance(const float2& a, const float2& b) {
+    float dx = a.x - b.x;
+    float dy = a.y - b.y;
+    return sqrtf(dx * dx + dy * dy);
+}
+
+// Distance function for 3D points (if needed)
+__forceinline__ __device__ float distance(const float3& a, const float3& b) {
+    float dx = a.x - b.x;
+    float dy = a.y - b.y;
+    float dz = a.z - b.z;
+    return sqrtf(dx * dx + dy * dy + dz * dz);
+}
+
+//------------------------------------------------------------------------------
+//
+// Helper functions for agent visualization
+//
+//------------------------------------------------------------------------------
+// Cast a ray and return hit distance
+__device__ float castAgentRay(const float3& origin, const float3& direction, float max_distance = 1000.0f) {
+    bool hit = traceOcclusion(
+        params.handle,
+        origin,
+        direction,
+        0.01f,  // tmin
+        max_distance
+    );
+
+    if (hit) {
+        // For simplicity, we'll estimate distance based on occlusion
+        // In a full implementation, you'd modify traceOcclusion to return distance
+        return max_distance * 0.5f; // Placeholder - you'll need to modify traceOcclusion
+    }
+    return max_distance;
+}
+
+// Perform 360-degree perception scan
+__device__ void agentPerceptionScan(Agent& agent) {
+    const int num_rays = 4; // 90-degree increments for 360-degree coverage
+    const float angle_step = 2.0f * M_PIf / num_rays;
+
+    for (int i = 0; i < num_rays; i++) {
+        float angle = i * angle_step;
+
+        // Create rotation matrix for current angle
+        float cos_a = cosf(angle);
+        float sin_a = sinf(angle);
+
+        // Rotate agent's direction by current angle
+        float3 scan_direction = make_float3(
+            agent.direction.x * cos_a - agent.direction.z * sin_a,
+            agent.direction.y,
+            agent.direction.x * sin_a + agent.direction.z * cos_a
+        );
+
+        // Cast ray in this direction
+        float distance = castAgentRay(agent.position, scan_direction);
+
+    }
+}
+
+// Move agent forward by a percentage of ray distance
+__device__ void moveAgent(Agent& agent) {
+    // Cast ray in current direction
+    float forward_distance = castAgentRay(agent.position, agent.direction);
+
+    // Move 20% of the ray distance
+    float move_distance = forward_distance * agent.march_distance;
+
+    // Update position
+    //agent.position = agent.position + agent.direction * move_distance;
+
+    // Random turn (30 degrees right in this example)
+    float turn_angle = 30.0f * M_PIf / 180.0f; // Convert to radians
+
+    // Apply rotation to direction
+    float cos_turn = cosf(turn_angle);
+    float sin_turn = sinf(turn_angle);
+
+    float3 new_direction = make_float3(
+        agent.direction.x * cos_turn - agent.direction.z * sin_turn,
+        agent.direction.y,
+        agent.direction.x * sin_turn + agent.direction.z * cos_turn
+    );
+
+    //agent.direction = normalize(new_direction);
+    //agent.step_count++;
+}
+
+
 
 //------------------------------------------------------------------------------
 //

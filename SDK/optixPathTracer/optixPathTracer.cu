@@ -708,3 +708,16 @@ extern "C" __global__ void __closesthit__radiance()
 
     storeClosesthitRadiancePRD( prd );
 }
+
+extern "C" __global__ void __closesthit__agent()
+{
+    optixSetPayloadTypes( PAYLOAD_TYPE_RADIANCE );
+
+    RadiancePRD prd = loadClosesthitRadiancePRD();
+
+    //const float3 P = optixGetWorldRayOrigin() + optixGetRayTmax() * ray_dir;
+
+    // Calculate distance between ray origin and hit point
+	//prd.distance = length(prd.origin - P);
+
+}

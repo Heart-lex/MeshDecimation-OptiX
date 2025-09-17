@@ -79,7 +79,12 @@ sutil::Trackball trackball;
 // Mouse state
 int32_t mouse_button = -1;
 
+
 int32_t samples_per_launch = 16;
+
+bool weight_accumulation = false;
+bool agent_mode = false;
+bool agent_moving = false;
 
 //------------------------------------------------------------------------------
 //
@@ -114,6 +119,7 @@ struct PathTracerState
     OptixProgramGroup              raygen_prog_group = 0;
     OptixProgramGroup              radiance_miss_group = 0;
     OptixProgramGroup              radiance_hit_group = 0;
+    OptixProgramGroup              collision_hit_group = 0;
 
     CUstream                       stream = 0;
     Params                         params;
@@ -130,6 +136,12 @@ struct PathTracerState
 
 static void mouseButtonCallback(GLFWwindow* window, int button, int action, int mods)
 {
+	// Disable mouse control in agent mode
+    if (agent_mode)
+    {
+        return;
+    }
+
     double xpos, ypos;
     glfwGetCursorPos(window, &xpos, &ypos);
 
@@ -147,6 +159,12 @@ static void mouseButtonCallback(GLFWwindow* window, int button, int action, int 
 
 static void cursorPosCallback(GLFWwindow* window, double xpos, double ypos)
 {
+    // Disable mouse control in agent mode
+    if (agent_mode)
+    {
+        return;
+    }
+
     Params* params = static_cast<Params*>(glfwGetWindowUserPointer(window));
 
     if (mouse_button == GLFW_MOUSE_BUTTON_LEFT)
@@ -198,13 +216,25 @@ static void keyCallback(GLFWwindow* window, int32_t key, int32_t /*scancode*/, i
     }
     else if (key == GLFW_KEY_G)
     {
-        // toggle UI draw
+		// Toggle triange weight accumulation
+        weight_accumulation = !weight_accumulation;
+        std::cout << "Triangle weight accumulation " << (weight_accumulation ? "enabled" : "disabled") << std::endl;
+    }
+    else if (key == GLFW_KEY_N)
+    {
+        agent_moving = true;
     }
 }
 
 
 static void scrollCallback(GLFWwindow* window, double xscroll, double yscroll)
 {
+    // Disable mouse control in agent mode
+    if (agent_mode)
+    {
+        return;
+    }
+
     if (trackball.wheelEvent((int)yscroll))
         camera_changed = true;
 }
@@ -235,6 +265,15 @@ void initLaunchParams(PathTracerState& state, const sutil::Scene& scene)
         reinterpret_cast<void**>(&state.params.accum_buffer),
         state.params.width * state.params.height * sizeof(float4)
     ));
+
+	// Allocate space for one float weight per triangle in the scene
+    CUDA_CHECK(cudaMalloc(
+        reinterpret_cast<void**>(&state.params.triangle_weights),
+        state.params.scene_triangle_count * sizeof(float)
+    ));
+
+    state.params.accumulate_weights = true;
+
     state.params.frame_buffer = nullptr;  // Will be set when output buffer is mapped
 
     state.params.samples_per_launch = samples_per_launch;
@@ -341,13 +380,17 @@ static void context_log_cb(unsigned int level, const char* tag, const char* mess
 }
 
 
-void initCameraState(const sutil::Scene& scene)
+void initCameraState(const sutil::Scene& scene, const PathTracerState& state)
 {
     camera = scene.camera();
+	camera.setEye(state.params.agent.camera_position);
+	//camera.setDirection(state.params.agent.direction);
+	camera.setFovY(state.params.agent.fov);
     camera_changed = true;
 
     trackball.setCamera(&camera);
-    trackball.setMoveSpeed(10.0f);
+    trackball.setViewMode(sutil::Trackball::EyeFixed);
+    trackball.setMoveSpeed(0.0f);
     trackball.setReferenceFrame(
         make_float3(1.0f, 0.0f, 0.0f),
         make_float3(0.0f, 0.0f, 1.0f),
@@ -358,13 +401,42 @@ void initCameraState(const sutil::Scene& scene)
 
 void initAgent(PathTracerState& state)
 {
-    state.params.agent.camera_position = make_float3(0.0f, 0.0f, 0.0f);
-    state.params.agent.direction = make_float3(0.0f, 0.0f, -1.0f);
-    state.params.agent.position = make_float3(0.0f, 20.0f, 0.0f);
+	// Place the agent in the center of the scene
+	state.params.agent.position = make_float3(0.0f, 0.0f, 5.0f);
+
+    // Place the camera slightly above the agent's position
+    state.params.agent.camera_position = state.params.agent.position + make_float3(0.0f, 1.5f, 0.0f);
+
+	// Have the agent look straight ahead initially
+	state.params.agent.direction = normalize(make_float3(0.0f, 0.0f, -1.0f));
+
+	state.params.agent.step_count = 0;
     state.params.agent.max_steps = 10;
 	state.params.agent.march_distance = 0.2f; // 20% of the way to the ray target each step
     state.params.agent.fov = 90.0f;
     state.params.agent_mode = true;
+}
+
+void updateCameraState(const PathTracerState& state)
+{
+    if (state.params.agent_mode)
+    {
+        camera.setEye(state.params.agent.camera_position);
+        camera_changed = true;
+    }
+}
+
+void updateAgentState(PathTracerState& state)
+{
+    if (state.params.agent_mode && /*state.params.agent.step_count < state.params.agent.max_steps &&*/ agent_moving)
+    {
+        state.params.agent.position += state.params.agent.direction * state.params.agent.march_distance;
+        state.params.agent.camera_position += state.params.agent.direction * state.params.agent.march_distance;
+        state.params.agent.step_count++;
+        camera_changed = true;
+    }
+
+    agent_moving = false;
 }
 
 void createContext(PathTracerState& state)
@@ -471,6 +543,21 @@ void createProgramGroups(PathTracerState& state)
             &state.radiance_hit_group
         ));
     }
+
+    {
+        OptixProgramGroupDesc hit_prog_group_desc = {};
+        hit_prog_group_desc.kind = OPTIX_PROGRAM_GROUP_KIND_HITGROUP;
+        hit_prog_group_desc.hitgroup.moduleCH = state.ptx_module;
+        hit_prog_group_desc.hitgroup.entryFunctionNameCH = "__closesthit__agent";
+        OPTIX_CHECK_LOG(optixProgramGroupCreate(
+            state.context,
+            &hit_prog_group_desc,
+            1,  // num program groups
+            &program_group_options,
+            LOG, &LOG_SIZE,
+            &state.collision_hit_group
+        ));
+    }
 }
 
 
@@ -481,6 +568,7 @@ void createPipeline(PathTracerState& state)
         state.raygen_prog_group,
         state.radiance_miss_group,
         state.radiance_hit_group,
+        state.collision_hit_group
     };
 
     OptixPipelineLinkOptions pipeline_link_options = {};
@@ -502,6 +590,7 @@ void createPipeline(PathTracerState& state)
     OPTIX_CHECK(optixUtilAccumulateStackSizes(state.raygen_prog_group, &stack_sizes, state.pipeline));
     OPTIX_CHECK(optixUtilAccumulateStackSizes(state.radiance_miss_group, &stack_sizes, state.pipeline));
     OPTIX_CHECK(optixUtilAccumulateStackSizes(state.radiance_hit_group, &stack_sizes, state.pipeline));
+    OPTIX_CHECK(optixUtilAccumulateStackSizes(state.collision_hit_group, &stack_sizes, state.pipeline));
 
     uint32_t max_trace_depth = 2;
     uint32_t max_cc_depth = 0;
@@ -563,6 +652,8 @@ void createSBT(PathTracerState& state, const sutil::Scene& scene)
     ));
 
     CUdeviceptr  d_hitgroup_records;
+
+    state.params.scene_triangle_count = 0u;
     
 	// Create hitgroup records for each mesh in the scene
     std::vector<HitGroupRecord> hitgroup_records;
@@ -582,6 +673,9 @@ void createSBT(PathTracerState& state, const sutil::Scene& scene)
             triangle_mesh.indices = mesh->indices[i];
             rec.data.geometry_data.setTriangleMesh(triangle_mesh);
 
+			// Count mesh triangles and add it to the total number of triangles
+			state.params.scene_triangle_count += mesh->indices[i].count / 3;
+
             const int32_t mat_idx = mesh->material_idx[i];
             if (mat_idx >= 0)
                 rec.data.material_data = scene.materials()[mat_idx];
@@ -589,11 +683,11 @@ void createSBT(PathTracerState& state, const sutil::Scene& scene)
                 rec.data.material_data = MaterialData();
             hitgroup_records.push_back(rec);
 
-
 			// TODO: Create occlusion hit group records if needed
-            //OPTIX_CHECK(optixSbtRecordPackHeader(state.radiance_hit_group, &rec));
         }
     }
+
+	std::cout << "Total number of triangles in the scene: " << state.params.scene_triangle_count << std::endl;
 
     const size_t hitgroup_record_size = sizeof(HitGroupRecord);
     CUDA_CHECK(cudaMalloc(
@@ -607,29 +701,6 @@ void createSBT(PathTracerState& state, const sutil::Scene& scene)
         hitgroup_record_size * RAY_TYPE_COUNT * hitgroup_records.size(),
         cudaMemcpyHostToDevice
     ));
-
-    //HitGroupRecord hitgroup_records[RAY_TYPE_COUNT * MAT_COUNT];
-    //for (int i = 0; i < MAT_COUNT; ++i)
-    //{
-    //    {
-    //        const int sbt_idx = i * RAY_TYPE_COUNT + 0;  // SBT for radiance ray-type for ith material
-
-    //        OPTIX_CHECK(optixSbtRecordPackHeader(state.radiance_hit_group, &hitgroup_records[sbt_idx]));
-    //        hitgroup_records[sbt_idx].data.emission_color = g_emission_colors[i];
-    //        hitgroup_records[sbt_idx].data.diffuse_color = g_diffuse_colors[i];
-    //        hitgroup_records[sbt_idx].data.vertices = reinterpret_cast<float4*>(state.d_vertices);
-    //    }
-
-    //    // Note that we do not need to use any program groups for occlusion
-    //    // rays as they are traced as 'probe rays' with no shading.
-    //}
-
-    //CUDA_CHECK(cudaMemcpy(
-    //    reinterpret_cast<void*>(d_hitgroup_records),
-    //    hitgroup_records.data(),
-    //    hitgroup_record_size * RAY_TYPE_COUNT * hitgroup_records.size(),
-    //    cudaMemcpyHostToDevice
-    //));
 
     state.sbt.raygenRecord = d_raygen_record;
     state.sbt.missRecordBase = d_miss_records;
@@ -725,11 +796,12 @@ int main(int argc, char* argv[])
         scene.finalize(false, RAY_TYPE_COUNT);
 
         OPTIX_CHECK(optixInit()); // Need to initialize function table
-        initCameraState(scene);
+        initAgent(state);
+        initCameraState(scene, state);
 
-        Agent agent;
+		// Store agent mode in params to determine if mouse control is enabled
+        agent_mode = state.params.agent_mode;
 
-		initAgent(state);
         //
         // Set up OptiX state
         //
@@ -771,6 +843,11 @@ int main(int argc, char* argv[])
 
                 do
                 {
+                    if (weight_accumulation)
+                        state.params.accumulate_weights = true;
+                    else
+						state.params.accumulate_weights = false;
+
                     auto t0 = std::chrono::steady_clock::now();
                     glfwPollEvents();
 
@@ -791,6 +868,9 @@ int main(int argc, char* argv[])
                     sutil::displayStats(state_update_time, render_time, display_time);
 
                     glfwSwapBuffers(window);
+
+					updateAgentState(state);
+					updateCameraState(state);
 
                     ++state.params.subframe_index;
                 } while (!glfwWindowShouldClose(window));

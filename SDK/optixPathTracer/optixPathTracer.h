@@ -180,6 +180,7 @@ struct RadiancePRD
     float3       radiance;
     float3       origin;
     float3       direction;
+    float        distance;
     int          done;
 };
 
@@ -235,7 +236,6 @@ struct Agent
 	float march_distance;
 
 };
-
 
 struct Params
 {

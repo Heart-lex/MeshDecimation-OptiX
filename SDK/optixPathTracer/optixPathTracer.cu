@@ -244,6 +244,38 @@ static __forceinline__ __device__ bool traceOcclusion(
 }
 
 
+// Returns distance to object if ray is occluded, else -1
+static __forceinline__ __device__ float traceDistance(
+    OptixTraversableHandle handle,
+    float3                 ray_origin,
+    float3                 ray_direction,
+    float                  tmin,
+    float                  tmax
+)
+{
+    // We are only casting probe rays so no shader invocation is needed
+    optixTraverse(
+        handle,
+        ray_origin,
+        ray_direction,
+        tmin,
+        tmax, 0.0f,                // rayTime
+        OptixVisibilityMask(1),
+        OPTIX_RAY_FLAG_TERMINATE_ON_FIRST_HIT | OPTIX_RAY_FLAG_DISABLE_ANYHIT,
+        0,                         // SBT offset
+        RAY_TYPE_COUNT,            // SBT stride
+        0                          // missSBTIndex
+    );
+
+    if (!optixHitObjectIsHit())
+    {
+		return -1.f; // Return -1 if no hit
+    }
+
+	return optixGetRayTmax(); // Return distance to hit point
+}
+
+
 //------------------------------------------------------------------------------
 //
 // Programs
@@ -523,15 +555,159 @@ extern "C" __global__ void __closesthit__radiance()
     storeClosesthitRadiancePRD(prd);
 }
 
+//-----------------------------------------------------------------------------------
+// Cast multiple rays around the agent to "sense" the environment
+//-----------------------------------------------------------------------------------
+__device__ void agentRayCastStep(Agent& agent)
+{
+    float3 dir = agent.direction;        // Current facing direction of the agent
+
+    const int num_rays = 4;             // We want 4 rays to cover 360° (90° increments)
+    float angles[num_rays] = { 0.f, 90.f, 180.f, 270.f }; // Relative rotation angles
+
+    // Rotate the agent's forward direction around the Y-axis by angles[i]
+    float rad = angles[0] * M_PIf / 180.0f;
+    float3 rotated_dir = make_float3(
+        cos(rad) * dir.x - sin(rad) * dir.z,
+        dir.y,
+        sin(rad) * dir.x + cos(rad) * dir.z
+    );
+
+    // Store the distance for this ray (Front)
+
+    params.agent.rotations[0] = rad;  // Store the distance for this ray
+
+    rad = angles[1] * M_PIf / 180.0f;
+    rotated_dir = make_float3(
+        cos(rad) * dir.x - sin(rad) * dir.z,
+        dir.y,
+        sin(rad) * dir.x + cos(rad) * dir.z
+    );
+
+	params.agent.rotations[1] = rad;  // Store the distance for this ray (Left)
+
+    rad = angles[2] * M_PIf / 180.0f;
+    rotated_dir = make_float3(
+        cos(rad) * dir.x - sin(rad) * dir.z,
+        dir.y,
+        sin(rad) * dir.x + cos(rad) * dir.z
+    );
+
+    params.agent.rotations[2] = rad;  // Store the distance for this ray (Back)
+
+    rad = angles[3] * M_PIf / 180.0f;
+    rotated_dir = make_float3(
+        cos(rad) * dir.x - sin(rad) * dir.z,
+        dir.y,
+        sin(rad) * dir.x + cos(rad) * dir.z
+    );
+
+    params.agent.rotations[3] = rad;  // Store the distance for this ray (Right)
+
+    printf("Front: %.2f, Left: %.2f, Back: %.2f, Right: %.2f\n",
+        params.agent.rotations[0], params.agent.rotations[1],
+		params.agent.rotations[2], params.agent.rotations[3]);
+}
+
+
+//-----------------------------------------------------------------------------------
+// Cast multiple rays around the agent to "sense" the environment
+//-----------------------------------------------------------------------------------
+__device__ void agentTraceDistances(Agent& agent)
+{
+	float distance_front = -1.f;
+	float distance_left = -1.f;
+	float distance_back = -1.f;
+	float distance_right = -1.f;
+
+	// Trace the forward ray (0°)
+    distance_front = traceDistance(params.handle, params.agent.eye_position, make_float3(0.f, params.agent.rotations[0], 0.f), 0.01f, 1e16f);
+ 
+    printf("Distance front: %.2f\n", distance_front);
+
+	// Trace the left ray (90°)
+    distance_left = traceDistance(params.handle, params.agent.eye_position, make_float3(0.f, params.agent.rotations[1], 0.f), 0.01f, 1e16f);
+
+    printf("Distance left: %.2f\n", distance_left);
+
+	// Trace the back ray (180°)
+    distance_back = traceDistance(params.handle, params.agent.eye_position, make_float3(0.f, params.agent.rotations[2], 0.f), 0.01f, 1e16f);
+
+    printf("Distance back: %.2f\n", distance_back);
+
+	// Trace the right ray (270°)
+    distance_right = traceDistance(params.handle, params.agent.eye_position, make_float3(0.f, params.agent.rotations[3], 0.f), 0.01f, 1e16f);
+
+    printf("Distance right: %.2f\n", distance_right);
+}
+
+
+//-----------------------------------------------------------------------------------
+// Move the agent forward and randomly rotate it a bit
+//-----------------------------------------------------------------------------------
+__device__ void agentMoveStep(Agent& agent)
+{
+    // Generate a random fraction of 30° rotation
+    unsigned int seed = static_cast<unsigned int>(agent.step_count);
+    float angle = 30.0f * rnd(seed);     // Random rotation angle
+    agent.step_count = seed;             // Update the seed
+    float rad = angle * M_PIf / 180.0f;          // Convert to radians
+
+    // Rotate the current direction by the random angle around Y-axis
+    float3 new_dir = make_float3(
+        cos(rad) * agent.direction.x - sin(rad) * agent.direction.z,
+        agent.direction.y,
+        sin(rad) * agent.direction.x + cos(rad) * agent.direction.z
+    );
+
+    // Move the agent along the XZ plane (keep Y constant) to march forward
+    agent.position += make_float3(new_dir.x, 0.f, new_dir.z) * agent.march_distance;
+
+    // Update the agent's facing direction (normalized)
+    agent.direction = normalize(make_float3(new_dir.x, 0.f, new_dir.z));
+}
+
+
 extern "C" __global__ void __closesthit__agent()
 {
-    optixSetPayloadTypes(PAYLOAD_TYPE_RADIANCE);
-
     RadiancePRD prd = loadClosesthitRadiancePRD();
 
+    agentTraceDistances(params.agent); // Trace rays and accumulate weights
     //const float3 P = optixGetWorldRayOrigin() + optixGetRayTmax() * ray_dir;
 
     // Calculate distance between ray origin and hit point
     //prd.distance = length(prd.origin - P);
+
+}
+
+
+//-----------------------------------------------------------------------------------
+// Ray generation kernel for the agent simulation
+//-----------------------------------------------------------------------------------
+extern "C" __global__ void __raygen__agent()
+{
+    printf("Agent raygen initialized.\n");
+
+    if (!params.agent_mode) return;      // Only run if agent mode is enabled
+
+
+    //const int    w = 1;
+    //const int    h = 1;
+    //const float3 eye = params.agent.eye_position;
+    //const float3 U = params.agent.U;
+    //const float3 V = params.agent.V;
+    //const float3 W = params.agent.W;
+    //const uint3  idx = optixGetLaunchIndex();
+    //const int    subframe_index = params.subframe_index;
+
+    // Initialize the payload for the ray
+    //RadiancePRD prd = {};
+    //prd.attenuation = make_float3(1.f);
+    //prd.seed = tea<4>(i, agent.step_count); // Unique seed per ray
+    //prd.depth = 0;
+
+    agentRayCastStep(params.agent);  // Agent scans the environment with multiple rays
+    //agentMoveStep(params.agent);     // Agent moves and rotates slightly
+    //params.agent.step_count++;       // Increment step counter for randomness and tracking
 
 }

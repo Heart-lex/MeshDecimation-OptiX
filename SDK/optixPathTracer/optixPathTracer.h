@@ -99,11 +99,22 @@ struct Agent
     float3 position;
     float3 direction;
 
-    float3 camera_position;
+    float3 eye_position;
+    float3       U;
+    float3       V;
+    float3       W;
+
+    // distances to the nearest obstacle in each of 4 directions (Front, Left, Back, Right)
+	float* distances;
+
+    // relative rotation angles to turn away from obstacles in each of 4 directions
+	float* rotations;
+
     float fov;
     int max_steps;
     int step_count;
     float march_distance;
+    float turn_angle;
 
 };
 

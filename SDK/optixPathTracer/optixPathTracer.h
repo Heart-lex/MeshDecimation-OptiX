@@ -138,6 +138,8 @@ struct Params
     float3       U;
     float3       V;
     float3       W;
+    
+	float* triangle_weights; // one float weight per triangle in the scene   
 
     float* triangle_weights; // one float weight per triangle in the scene   
 

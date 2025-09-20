@@ -473,7 +473,7 @@ void agentMoveStep(Agent& agent)
         }
 	}
 
-    // Generate a random fraction of 30° rotation
+    // Generate a random fraction of 30ï¿½ rotation
     unsigned int seed = agent.step_count;
     srand(seed);
     float angle = 30.0f * rand();          // Random rotation angle
@@ -949,7 +949,7 @@ int main(int argc, char* argv[])
     // Parse command line options
     //
     std::string outfile;
-    std::string infile = sutil::sampleDataFilePath("UnrealLevel/Lvl_FirstPerson.gltf");
+    std::string infile = sutil::sampleDataFilePath("Cube/cube.gltf");
 
     for (int i = 1; i < argc; ++i)
     {

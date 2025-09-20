@@ -578,7 +578,7 @@ __device__ void agentRayCastStep(Agent& agent)
 {
     float3 dir = agent.direction;        // Current facing direction of the agent
 
-    const int num_rays = 4;             // We want 4 rays to cover 360° (90° increments)
+    const int num_rays = 4;             // We want 4 rays to cover 360ï¿½ (90ï¿½ increments)
     float angles[num_rays] = { 0.f, 90.f, 180.f, 270.f }; // Relative rotation angles
 
     // Rotate the agent's forward direction around the Y-axis by angles[i]
@@ -668,28 +668,28 @@ __device__ void agentTraceDistances(Agent& agent)
 	float distance_back = -1.f;
 	float distance_right = -1.f;
 
-	// Trace the forward ray (0°)
+	// Trace the forward ray (0ï¿½)
     distance_front = traceDistance(params.handle, params.agent.eye_position, make_float3(0.f, 0.f, 0.f), 0.01f, 1e16f);
  
     printf("Distance front: %.2f\n", distance_front);
 
     agent.d_distances[0] = distance_front;
 
-	// Trace the left ray (90°)
+	// Trace the left ray (90ï¿½)
     distance_left = traceDistance(params.handle, params.agent.eye_position, make_float3(0.f, 0.f, 0.f), 0.01f, 1e16f);
 
     printf("Distance left: %.2f\n", distance_left);
 
     agent.d_distances[1] = distance_left;
 
-	// Trace the back ray (180°)
+	// Trace the back ray (180ï¿½)
     distance_back = traceDistance(params.handle, params.agent.eye_position, make_float3(0.f, 0.f, 0.f), 0.01f, 1e16f);
 
     printf("Distance back: %.2f\n", distance_back);
     
     agent.d_distances[2] = distance_back;
 
-	// Trace the right ray (270°)
+	// Trace the right ray (270ï¿½)
     distance_right = traceDistance(params.handle, params.agent.eye_position, make_float3(0.f, 0.f, 0.f), 0.01f, 1e16f);
 
     printf("Distance right: %.2f\n", distance_right);

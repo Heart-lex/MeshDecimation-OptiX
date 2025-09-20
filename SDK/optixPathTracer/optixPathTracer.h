@@ -50,6 +50,7 @@ struct RadiancePRD
     float3       radiance;
     float3       origin;
     float3       direction;
+    float        distance;
     int          done;
 };
 
@@ -98,14 +99,30 @@ struct Agent
     float3 position;
     float3 direction;
 
-    float3 camera_position;
-	float fov;
+    float3 eye_position;
+    float3       U;
+    float3       V;
+    float3       W;
+
+    // (Device) distances to the nearest obstacle in each of 4 directions (Front, Left, Back, Right)
+	float* d_distances;
+
+    // (Host) distances to the nearest obstacle in each of 4 directions (Front, Left, Back, Right)
+    float* h_distances;
+
+    // (Device) relative rotation angles to turn away from obstacles in each of 4 directions
+	float* d_rotations;
+
+    // (Host) relative rotation angles to turn away from obstacles in each of 4 directions
+    float* h_rotations;
+
+    float fov;
     int max_steps;
     int step_count;
-	float march_distance;
+    float march_distance;
+    float turn_angle;
 
 };
-
 
 struct Params
 {
@@ -124,11 +141,13 @@ struct Params
     
 	float* triangle_weights; // one float weight per triangle in the scene   
 
+    float* triangle_weights; // one float weight per triangle in the scene   
+
     ParallelogramLight     light; // TODO: make light list
     OptixTraversableHandle handle;
     Agent agent;
     bool agent_mode;
-	bool accumulate_weights;
+    bool accumulate_weights;
 };
 
 

@@ -79,9 +79,12 @@ sutil::Trackball trackball;
 // Mouse state
 int32_t mouse_button = -1;
 
+
 int32_t samples_per_launch = 16;
 
 bool weight_accumulation = false;
+bool agent_mode = false;
+bool agent_moving = false;
 
 //------------------------------------------------------------------------------
 //
@@ -112,16 +115,21 @@ struct PathTracerState
     OptixModule                    ptx_module = 0;
     OptixPipelineCompileOptions    pipeline_compile_options = {};
     OptixPipeline                  pipeline = 0;
+	OptixPipeline				   agent_pipeline = 0;
 
     OptixProgramGroup              raygen_prog_group = 0;
     OptixProgramGroup              radiance_miss_group = 0;
     OptixProgramGroup              radiance_hit_group = 0;
+    OptixProgramGroup              agent_raygen_prog_group = 0;
+    OptixProgramGroup              agent_hit_group = 0;
+    OptixProgramGroup              agent_miss_group = 0;
 
     CUstream                       stream = 0;
     Params                         params;
     Params* d_params;
 
     OptixShaderBindingTable        sbt = {};
+    OptixShaderBindingTable        sbtAgent = {};
 };
 
 //------------------------------------------------------------------------------
@@ -132,6 +140,12 @@ struct PathTracerState
 
 static void mouseButtonCallback(GLFWwindow* window, int button, int action, int mods)
 {
+	// Disable mouse control in agent mode
+    if (agent_mode)
+    {
+        return;
+    }
+
     double xpos, ypos;
     glfwGetCursorPos(window, &xpos, &ypos);
 
@@ -149,6 +163,12 @@ static void mouseButtonCallback(GLFWwindow* window, int button, int action, int 
 
 static void cursorPosCallback(GLFWwindow* window, double xpos, double ypos)
 {
+    // Disable mouse control in agent mode
+    if (agent_mode)
+    {
+        return;
+    }
+
     Params* params = static_cast<Params*>(glfwGetWindowUserPointer(window));
 
     if (mouse_button == GLFW_MOUSE_BUTTON_LEFT)
@@ -204,11 +224,21 @@ static void keyCallback(GLFWwindow* window, int32_t key, int32_t /*scancode*/, i
         weight_accumulation = !weight_accumulation;
         std::cout << "Triangle weight accumulation " << (weight_accumulation ? "enabled" : "disabled") << std::endl;
     }
+    else if (key == GLFW_KEY_N)
+    {
+        agent_moving = true;
+    }
 }
 
 
 static void scrollCallback(GLFWwindow* window, double xscroll, double yscroll)
 {
+    // Disable mouse control in agent mode
+    if (agent_mode)
+    {
+        return;
+    }
+
     if (trackball.wheelEvent((int)yscroll))
         camera_changed = true;
 }
@@ -246,6 +276,20 @@ void initLaunchParams(PathTracerState& state, const sutil::Scene& scene)
         state.params.scene_triangle_count * sizeof(float)
     ));
 
+    CUDA_CHECK(cudaMalloc(
+        reinterpret_cast<void**>(&state.params.agent.d_distances),
+        4 * sizeof(float)
+	));
+
+    CUDA_CHECK(cudaMalloc(
+        reinterpret_cast<void**>(&state.params.agent.d_rotations),
+        4 * sizeof(float)
+    ));
+
+    CUDA_CHECK(cudaMallocHost(&state.params.agent.h_distances, 4 * sizeof(float)));
+
+    CUDA_CHECK(cudaMallocHost(&state.params.agent.h_rotations, 4 * sizeof(float)));
+
     state.params.accumulate_weights = true;
 
     state.params.frame_buffer = nullptr;  // Will be set when output buffer is mapped
@@ -262,7 +306,6 @@ void initLaunchParams(PathTracerState& state, const sutil::Scene& scene)
 
     CUDA_CHECK(cudaStreamCreate(&state.stream));
     CUDA_CHECK(cudaMalloc(reinterpret_cast<void**>(&state.d_params), sizeof(Params)));
-
 }
 
 
@@ -329,6 +372,18 @@ void launchSubframe(sutil::CUDAOutputBuffer<uchar4>& output_buffer, PathTracerSt
     ));
     output_buffer.unmap();
     CUDA_SYNC_CHECK();
+
+    OPTIX_CHECK(optixLaunch(
+        state.agent_pipeline,
+        state.stream,
+        reinterpret_cast<CUdeviceptr>(state.d_params),
+        sizeof(Params),
+        &state.sbtAgent,
+        1,   // launch width
+        1,  // launch height
+        1                     // launch depth
+    ));
+    CUDA_SYNC_CHECK();
 }
 
 
@@ -354,13 +409,17 @@ static void context_log_cb(unsigned int level, const char* tag, const char* mess
 }
 
 
-void initCameraState(const sutil::Scene& scene)
+void initCameraState(const sutil::Scene& scene, const PathTracerState& state)
 {
     camera = scene.camera();
+	camera.setEye(state.params.agent.eye_position);
+	//camera.setDirection(state.params.agent.direction);
+	camera.setFovY(state.params.agent.fov);
     camera_changed = true;
 
     trackball.setCamera(&camera);
-    trackball.setMoveSpeed(10.0f);
+    trackball.setViewMode(sutil::Trackball::LookAtFixed);
+    trackball.setMoveSpeed(0.0f);
     trackball.setReferenceFrame(
         make_float3(1.0f, 0.0f, 0.0f),
         make_float3(0.0f, 0.0f, 1.0f),
@@ -369,16 +428,84 @@ void initCameraState(const sutil::Scene& scene)
     trackball.setGimbalLock(true);
 }
 
+
+void updateCameraState(const PathTracerState& state)
+{
+    if (state.params.agent_mode)
+    {
+        camera.setEye(state.params.agent.eye_position);
+        camera_changed = true;
+    }
+}
+
 void initAgent(PathTracerState& state)
 {
-    state.params.agent.camera_position = make_float3(0.0f, 0.0f, 0.0f);
-    state.params.agent.direction = make_float3(0.0f, 0.0f, -1.0f);
-    state.params.agent.position = make_float3(0.0f, 20.0f, 0.0f);
+    // Place the agent in the center of the scene
+    state.params.agent.position = make_float3(10.0f, 0.0f, 15.0f);
+
+    // Place the camera slightly above the agent's position
+    state.params.agent.eye_position = state.params.agent.position + make_float3(0.0f, 1.5f, 0.0f);
+
+    // Have the agent look straight ahead initially
+    state.params.agent.direction = normalize(make_float3(0.0f, 0.0f, -1.0f));
+
+    state.params.agent.step_count = 0;
     state.params.agent.max_steps = 10;
-	state.params.agent.march_distance = 0.2f; // 20% of the way to the ray target each step
+    state.params.agent.march_distance = 0.2f; // 20% of the way to the ray target each step
     state.params.agent.fov = 90.0f;
     state.params.agent_mode = true;
 }
+
+
+//-----------------------------------------------------------------------------------
+// Move the agent forward and randomly rotate it a bit
+//-----------------------------------------------------------------------------------
+void agentMoveStep(Agent& agent)
+{
+	float maximum_distance = agent.h_distances[0]; // Maximum distance to check for obstacles
+	float rotation_angle = agent.h_rotations[0]; // Rotation angle corresponding to the maximum distance
+    for (int i = 1; i < 4; i++)
+    {
+		if (agent.h_distances[i] > maximum_distance) // Check if this is the new maximum
+        {
+            maximum_distance = agent.h_distances[i];
+			rotation_angle = agent.h_rotations[i];
+        }
+	}
+
+    // Generate a random fraction of 30� rotation
+    unsigned int seed = agent.step_count;
+    srand(seed);
+    float angle = 30.0f * rand();          // Random rotation angle
+    float rad = angle * M_PIf / 180.0f;    // Convert to radians
+
+    // Rotate the current direction by the random angle around Y-axis
+    float3 new_dir = make_float3(
+        cos(rad) * agent.direction.x - sin(rad) * agent.direction.z,
+        agent.direction.y,
+        sin(rad) * agent.direction.x + cos(rad) * agent.direction.z
+    );
+
+    // Move the agent along the XZ plane (keep Y constant) to march forward
+    agent.position += make_float3(new_dir.x, 0.f, new_dir.z) * agent.march_distance;
+
+    // Update the agent's facing direction (normalized)
+    agent.direction = normalize(make_float3(new_dir.x, 0.f, new_dir.z));
+}
+
+void updateAgentState(PathTracerState& state)
+{
+    if (state.params.agent_mode && /*state.params.agent.step_count < state.params.agent.max_steps &&*/ agent_moving)
+    {
+		agentMoveStep(state.params.agent);
+        state.params.agent.eye_position += state.params.agent.direction * state.params.agent.march_distance;
+        state.params.agent.step_count++;
+        camera_changed = true;
+    }
+
+    agent_moving = false;
+}
+
 
 void createContext(PathTracerState& state)
 {
@@ -484,6 +611,52 @@ void createProgramGroups(PathTracerState& state)
             &state.radiance_hit_group
         ));
     }
+
+    OptixProgramGroupOptions  agent_program_group_options = {};
+
+    {
+        OptixProgramGroupDesc agent_raygen_prog_group_desc = {};
+        agent_raygen_prog_group_desc.kind = OPTIX_PROGRAM_GROUP_KIND_RAYGEN;
+        agent_raygen_prog_group_desc.raygen.module = state.ptx_module;
+        agent_raygen_prog_group_desc.raygen.entryFunctionName = "__raygen__agent";
+
+        OPTIX_CHECK_LOG(optixProgramGroupCreate(
+            state.context, &agent_raygen_prog_group_desc,
+            1,  // num program groups
+            &agent_program_group_options,
+            LOG, &LOG_SIZE,
+            &state.agent_raygen_prog_group
+        ));
+    }
+
+    {
+        OptixProgramGroupDesc agent_miss_prog_group_desc = {};
+        agent_miss_prog_group_desc.kind = OPTIX_PROGRAM_GROUP_KIND_MISS;
+        agent_miss_prog_group_desc.miss.module = state.ptx_module;
+        agent_miss_prog_group_desc.miss.entryFunctionName = "__miss__agent";
+        OPTIX_CHECK_LOG(optixProgramGroupCreate(
+            state.context, &agent_miss_prog_group_desc,
+            1,  // num program groups
+            &agent_program_group_options,
+            LOG, &LOG_SIZE,
+            &state.agent_miss_group
+        ));
+    }
+
+    {
+        OptixProgramGroupDesc agent_hit_prog_group_desc = {};
+        agent_hit_prog_group_desc.kind = OPTIX_PROGRAM_GROUP_KIND_HITGROUP;
+        agent_hit_prog_group_desc.hitgroup.moduleCH = state.ptx_module;
+        agent_hit_prog_group_desc.hitgroup.entryFunctionNameCH = "__closesthit__agent";
+        OPTIX_CHECK_LOG(optixProgramGroupCreate(
+            state.context,
+            &agent_hit_prog_group_desc,
+            1,  // num program groups
+            &agent_program_group_options,
+            LOG, &LOG_SIZE,
+			&state.agent_hit_group
+        ));
+    }
 }
 
 
@@ -494,6 +667,11 @@ void createPipeline(PathTracerState& state)
         state.raygen_prog_group,
         state.radiance_miss_group,
         state.radiance_hit_group,
+
+		// Agent programs
+        state.agent_raygen_prog_group,
+        state.agent_miss_group,
+        state.agent_hit_group,
     };
 
     OptixPipelineLinkOptions pipeline_link_options = {};
@@ -509,12 +687,39 @@ void createPipeline(PathTracerState& state)
         &state.pipeline
     ));
 
+    OptixProgramGroup agent_program_groups[] =
+    {
+        // Agent programs
+        state.agent_raygen_prog_group,
+        state.agent_miss_group,
+        state.agent_hit_group,
+    };
+
+    OptixPipelineLinkOptions agent_pipeline_link_options = {};
+    agent_pipeline_link_options.maxTraceDepth = 2;
+
+    OPTIX_CHECK_LOG(optixPipelineCreate(
+        state.context,
+        &state.pipeline_compile_options,
+        &agent_pipeline_link_options,
+        agent_program_groups,
+        sizeof(agent_program_groups) / sizeof(agent_program_groups[0]),
+        LOG, &LOG_SIZE,
+        &state.agent_pipeline
+    ));
+
     // We need to specify the max traversal depth.  Calculate the stack sizes, so we can specify all
     // parameters to optixPipelineSetStackSize.
     OptixStackSizes stack_sizes = {};
     OPTIX_CHECK(optixUtilAccumulateStackSizes(state.raygen_prog_group, &stack_sizes, state.pipeline));
     OPTIX_CHECK(optixUtilAccumulateStackSizes(state.radiance_miss_group, &stack_sizes, state.pipeline));
     OPTIX_CHECK(optixUtilAccumulateStackSizes(state.radiance_hit_group, &stack_sizes, state.pipeline));
+
+	// Agent pipeline stack sizes
+    OPTIX_CHECK(optixUtilAccumulateStackSizes(state.agent_raygen_prog_group, &stack_sizes, state.agent_pipeline));
+    OPTIX_CHECK(optixUtilAccumulateStackSizes(state.agent_miss_group, &stack_sizes, state.agent_pipeline));
+    OPTIX_CHECK(optixUtilAccumulateStackSizes(state.agent_hit_group, &stack_sizes, state.agent_pipeline));
+
 
     uint32_t max_trace_depth = 2;
     uint32_t max_cc_depth = 0;
@@ -540,6 +745,14 @@ void createPipeline(PathTracerState& state)
         continuation_stack_size,
         max_traversal_depth
     ));
+
+    OPTIX_CHECK(optixPipelineSetStackSize(
+        state.agent_pipeline,
+        direct_callable_stack_size_from_traversal,
+        direct_callable_stack_size_from_state,
+        continuation_stack_size,
+        max_traversal_depth
+    ));
 }
 
 
@@ -559,6 +772,19 @@ void createSBT(PathTracerState& state, const sutil::Scene& scene)
         cudaMemcpyHostToDevice
     ));
 
+    CUdeviceptr  d_agent_raygen_record;
+    const size_t agent_raygen_record_size = sizeof(RayGenRecord);
+    CUDA_CHECK(cudaMalloc(reinterpret_cast<void**>(&d_agent_raygen_record), agent_raygen_record_size));
+
+    RayGenRecord agent_sbt = {};
+    OPTIX_CHECK(optixSbtRecordPackHeader(state.agent_raygen_prog_group, &agent_sbt));
+
+    CUDA_CHECK(cudaMemcpy(
+        reinterpret_cast<void*>(d_agent_raygen_record),
+        &agent_sbt,
+        agent_raygen_record_size,
+        cudaMemcpyHostToDevice
+    ));
 
     CUdeviceptr  d_miss_records;
     const size_t miss_record_size = sizeof(MissRecord);
@@ -575,19 +801,38 @@ void createSBT(PathTracerState& state, const sutil::Scene& scene)
         cudaMemcpyHostToDevice
     ));
 
-    CUdeviceptr  d_hitgroup_records;
+	// Agent miss record
+    CUdeviceptr  d_agent_miss_records;
+    const size_t agent_miss_record_size = sizeof(MissRecord);
+    CUDA_CHECK(cudaMalloc(reinterpret_cast<void**>(&d_agent_miss_records), agent_miss_record_size * RAY_TYPE_COUNT));
+
+    MissRecord agent_ms_sbt;
+    OPTIX_CHECK(optixSbtRecordPackHeader(state.agent_miss_group, &agent_ms_sbt));
+
+    CUDA_CHECK(cudaMemcpy(
+        reinterpret_cast<void*>(d_agent_miss_records),
+        &agent_ms_sbt,
+        agent_miss_record_size * RAY_TYPE_COUNT,
+        cudaMemcpyHostToDevice
+    ));
+
+	CUdeviceptr  d_hitgroup_records;
+    CUdeviceptr  d_agent_hitgroup_records;
 
     state.params.scene_triangle_count = 0u;
     
 	// Create hitgroup records for each mesh in the scene
     std::vector<HitGroupRecord> hitgroup_records;
+    std::vector<HitGroupRecord> agent_hitgroup_records;
     for (const auto& instance : scene.instances())
     {
         const auto mesh = scene.meshes()[instance->mesh_idx];
         for (size_t i = 0; i < mesh->material_idx.size(); ++i)
         {
-            HitGroupRecord rec = {};
+            HitGroupRecord rec;
+			HitGroupRecord rec_agent;
             OPTIX_CHECK(optixSbtRecordPackHeader(state.radiance_hit_group, &rec));
+            OPTIX_CHECK(optixSbtRecordPackHeader(state.agent_hit_group, &rec_agent));
             GeometryData::TriangleMesh triangle_mesh = {};
             triangle_mesh.normals = mesh->normals[i];
             triangle_mesh.positions = mesh->positions[i];
@@ -596,19 +841,21 @@ void createSBT(PathTracerState& state, const sutil::Scene& scene)
             triangle_mesh.colors = mesh->colors[i];
             triangle_mesh.indices = mesh->indices[i];
             rec.data.geometry_data.setTriangleMesh(triangle_mesh);
+            rec.data.material_data = scene.materials()[mesh->material_idx[i]];
 
-			// Count mesh triangles and add it to the total number of triangles
-			state.params.scene_triangle_count += mesh->indices[i].count / 3;
+            rec_agent.data.geometry_data.setTriangleMesh(triangle_mesh);
+            rec_agent.data.material_data = scene.materials()[mesh->material_idx[i]];
 
-            const int32_t mat_idx = mesh->material_idx[i];
-            if (mat_idx >= 0)
-                rec.data.material_data = scene.materials()[mat_idx];
-            else
-                rec.data.material_data = MaterialData();
+            // Count mesh triangles and add it to the total number of triangles
+            state.params.scene_triangle_count += mesh->indices[i].count / 3;
+
+            //const int32_t mat_idx = mesh->material_idx[i];
+            //if (mat_idx >= 0)
+            //    rec.data.material_data = scene.materials()[mat_idx];
+            //else
+            //    rec.data.material_data = MaterialData();
             hitgroup_records.push_back(rec);
-
-
-			// TODO: Create occlusion hit group records if needed
+			agent_hitgroup_records.push_back(rec_agent);
         }
     }
 
@@ -634,15 +881,40 @@ void createSBT(PathTracerState& state, const sutil::Scene& scene)
     state.sbt.hitgroupRecordBase = d_hitgroup_records;
     state.sbt.hitgroupRecordStrideInBytes = static_cast<unsigned int>(hitgroup_record_size);
     state.sbt.hitgroupRecordCount = static_cast<unsigned int> (hitgroup_records.size());
+    
+    CUDA_CHECK(cudaMalloc(
+        reinterpret_cast<void**>(&d_agent_hitgroup_records),
+        hitgroup_record_size * RAY_TYPE_COUNT * agent_hitgroup_records.size()
+    ));
+
+    CUDA_CHECK(cudaMemcpy(
+        reinterpret_cast<void*>(d_agent_hitgroup_records),
+        agent_hitgroup_records.data(),
+        hitgroup_record_size * RAY_TYPE_COUNT * agent_hitgroup_records.size(),
+        cudaMemcpyHostToDevice
+    ));
+
+	// Agent SBT
+    state.sbtAgent.raygenRecord = d_agent_raygen_record;
+    state.sbtAgent.missRecordBase = d_agent_miss_records;
+    state.sbtAgent.missRecordStrideInBytes = static_cast<uint32_t>(agent_miss_record_size);
+    state.sbtAgent.missRecordCount = RAY_TYPE_COUNT;
+    state.sbtAgent.hitgroupRecordBase = d_agent_hitgroup_records;
+    state.sbtAgent.hitgroupRecordStrideInBytes = static_cast<unsigned int>(hitgroup_record_size);
+    state.sbtAgent.hitgroupRecordCount = static_cast<unsigned int> (agent_hitgroup_records.size());
 }
 
 
 void cleanupState(PathTracerState& state)
 {
     OPTIX_CHECK(optixPipelineDestroy(state.pipeline));
+    OPTIX_CHECK(optixPipelineDestroy(state.agent_pipeline));
     OPTIX_CHECK(optixProgramGroupDestroy(state.raygen_prog_group));
     OPTIX_CHECK(optixProgramGroupDestroy(state.radiance_miss_group));
     OPTIX_CHECK(optixProgramGroupDestroy(state.radiance_hit_group));
+    OPTIX_CHECK(optixProgramGroupDestroy(state.agent_raygen_prog_group));
+    OPTIX_CHECK(optixProgramGroupDestroy(state.agent_miss_group));
+    OPTIX_CHECK(optixProgramGroupDestroy(state.agent_hit_group));
     OPTIX_CHECK(optixModuleDestroy(state.ptx_module));
     OPTIX_CHECK(optixDeviceContextDestroy(state.context));
 
@@ -650,6 +922,9 @@ void cleanupState(PathTracerState& state)
     CUDA_CHECK(cudaFree(reinterpret_cast<void*>(state.sbt.raygenRecord)));
     CUDA_CHECK(cudaFree(reinterpret_cast<void*>(state.sbt.missRecordBase)));
     CUDA_CHECK(cudaFree(reinterpret_cast<void*>(state.sbt.hitgroupRecordBase)));
+    CUDA_CHECK(cudaFree(reinterpret_cast<void*>(state.sbtAgent.raygenRecord)));
+    CUDA_CHECK(cudaFree(reinterpret_cast<void*>(state.sbtAgent.missRecordBase)));
+    CUDA_CHECK(cudaFree(reinterpret_cast<void*>(state.sbtAgent.hitgroupRecordBase)));
     CUDA_CHECK(cudaFree(reinterpret_cast<void*>(state.d_vertices)));
     CUDA_CHECK(cudaFree(reinterpret_cast<void*>(state.d_gas_output_buffer)));
     CUDA_CHECK(cudaFree(reinterpret_cast<void*>(state.params.accum_buffer)));
@@ -721,11 +996,12 @@ int main(int argc, char* argv[])
         scene.finalize(false, RAY_TYPE_COUNT);
 
         OPTIX_CHECK(optixInit()); // Need to initialize function table
-        initCameraState(scene);
+        initAgent(state);
+        initCameraState(scene, state);
 
-        Agent agent;
+		// Store agent mode in params to determine if mouse control is enabled
+        agent_mode = state.params.agent_mode;
 
-		initAgent(state);
         //
         // Set up OptiX state
         //
@@ -792,6 +1068,22 @@ int main(int argc, char* argv[])
                     sutil::displayStats(state_update_time, render_time, display_time);
 
                     glfwSwapBuffers(window);
+
+                    CUDA_CHECK(cudaMemcpyAsync(
+                        reinterpret_cast<void*>(state.params.agent.h_distances),
+                        reinterpret_cast<void*>(state.params.agent.d_distances),
+                        4 * sizeof(float),
+                        cudaMemcpyDeviceToHost
+					));
+					CUDA_SYNC_CHECK();
+
+					updateAgentState(state);
+					updateCameraState(state);
+
+                    printf("(Host) Distance front: %.2f\n", state.params.agent.h_distances[0]);
+                    printf("(Host) Distance left: %.2f\n", state.params.agent.h_distances[1]);
+                    printf("(Host) Distance back: %.2f\n", state.params.agent.h_distances[2]);
+                    printf("(Host) Distance right: %.2f\n", state.params.agent.h_distances[3]);
 
                     ++state.params.subframe_index;
                 } while (!glfwWindowShouldClose(window));

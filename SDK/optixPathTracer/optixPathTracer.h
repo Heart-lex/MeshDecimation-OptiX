@@ -104,11 +104,17 @@ struct Agent
     float3       V;
     float3       W;
 
-    // distances to the nearest obstacle in each of 4 directions (Front, Left, Back, Right)
-	float* distances;
+    // (Device) distances to the nearest obstacle in each of 4 directions (Front, Left, Back, Right)
+	float* d_distances;
 
-    // relative rotation angles to turn away from obstacles in each of 4 directions
-	float* rotations;
+    // (Host) distances to the nearest obstacle in each of 4 directions (Front, Left, Back, Right)
+    float* h_distances;
+
+    // (Device) relative rotation angles to turn away from obstacles in each of 4 directions
+	float* d_rotations;
+
+    // (Host) relative rotation angles to turn away from obstacles in each of 4 directions
+    float* h_rotations;
 
     float fov;
     int max_steps;

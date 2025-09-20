@@ -37,6 +37,7 @@
 constexpr unsigned int RAY_TYPE_COUNT = 1;
 
 constexpr OptixPayloadTypeID PAYLOAD_TYPE_RADIANCE = OPTIX_PAYLOAD_TYPE_ID_0;
+constexpr OptixPayloadTypeID PAYLOAD_TYPE_AGENT = OPTIX_PAYLOAD_TYPE_ID_1;
 
 struct RadiancePRD
 {
@@ -48,6 +49,19 @@ struct RadiancePRD
     // these are produced by CH and MS, and consumed by the caller after trace returned.
     float3       emitted;
     float3       radiance;
+    float3       origin;
+    float3       direction;
+    float        distance;
+    int          done;
+};
+
+struct AgentPRD
+{
+    // these are produced by the caller, passed into trace, consumed/modified by CH and MS and consumed again by the caller after trace returned.
+	unsigned int rotation_count;
+    int          depth;
+
+    // these are produced by CH and MS, and consumed by the caller after trace returned.
     float3       origin;
     float3       direction;
     float        distance;
@@ -85,6 +99,24 @@ const unsigned int radiancePayloadSemantics[18] =
     OPTIX_PAYLOAD_SEMANTICS_TRACE_CALLER_READ | OPTIX_PAYLOAD_SEMANTICS_CH_WRITE | OPTIX_PAYLOAD_SEMANTICS_MS_WRITE
 };
 
+const unsigned int agentPayloadSemantics[9] =
+{
+	//AgentPRD::rotation_count
+	OPTIX_PAYLOAD_SEMANTICS_TRACE_CALLER_READ_WRITE | OPTIX_PAYLOAD_SEMANTICS_CH_READ_WRITE,
+    // AgentPRD::depth
+    OPTIX_PAYLOAD_SEMANTICS_TRACE_CALLER_READ_WRITE | OPTIX_PAYLOAD_SEMANTICS_CH_READ_WRITE,
+    // AgentPRD::origin
+    OPTIX_PAYLOAD_SEMANTICS_TRACE_CALLER_READ | OPTIX_PAYLOAD_SEMANTICS_CH_WRITE,
+    OPTIX_PAYLOAD_SEMANTICS_TRACE_CALLER_READ | OPTIX_PAYLOAD_SEMANTICS_CH_WRITE,
+    OPTIX_PAYLOAD_SEMANTICS_TRACE_CALLER_READ | OPTIX_PAYLOAD_SEMANTICS_CH_WRITE,
+    // AgentPRD::direction
+    OPTIX_PAYLOAD_SEMANTICS_TRACE_CALLER_READ | OPTIX_PAYLOAD_SEMANTICS_CH_WRITE,
+    OPTIX_PAYLOAD_SEMANTICS_TRACE_CALLER_READ | OPTIX_PAYLOAD_SEMANTICS_CH_WRITE,
+    OPTIX_PAYLOAD_SEMANTICS_TRACE_CALLER_READ | OPTIX_PAYLOAD_SEMANTICS_CH_WRITE,
+    // AgentPRD::done
+    OPTIX_PAYLOAD_SEMANTICS_TRACE_CALLER_READ | OPTIX_PAYLOAD_SEMANTICS_CH_WRITE | OPTIX_PAYLOAD_SEMANTICS_MS_WRITE
+};
+
 
 struct ParallelogramLight
 {
@@ -111,10 +143,10 @@ struct Agent
     float* h_distances;
 
     // (Device) relative rotation angles to turn away from obstacles in each of 4 directions
-	float* d_rotations;
+	float3* d_rotations;
 
     // (Host) relative rotation angles to turn away from obstacles in each of 4 directions
-    float* h_rotations;
+    float3* h_rotations;
 
     float fov;
     int max_steps;
@@ -140,8 +172,6 @@ struct Params
     float3       W;
     
 	float* triangle_weights; // one float weight per triangle in the scene   
-
-    float* triangle_weights; // one float weight per triangle in the scene   
 
     ParallelogramLight     light; // TODO: make light list
     OptixTraversableHandle handle;

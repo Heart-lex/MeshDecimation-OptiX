@@ -283,12 +283,12 @@ void initLaunchParams(PathTracerState& state, const sutil::Scene& scene)
 
     CUDA_CHECK(cudaMalloc(
         reinterpret_cast<void**>(&state.params.agent.d_rotations),
-        4 * sizeof(float)
+        4 * sizeof(float3)
     ));
 
     CUDA_CHECK(cudaMallocHost(&state.params.agent.h_distances, 4 * sizeof(float)));
 
-    CUDA_CHECK(cudaMallocHost(&state.params.agent.h_rotations, 4 * sizeof(float)));
+    CUDA_CHECK(cudaMallocHost(&state.params.agent.h_rotations, 4 * sizeof(float3)));
 
     state.params.accumulate_weights = true;
 
@@ -418,7 +418,7 @@ void initCameraState(const sutil::Scene& scene, const PathTracerState& state)
     camera_changed = true;
 
     trackball.setCamera(&camera);
-    trackball.setViewMode(sutil::Trackball::LookAtFixed);
+    trackball.setViewMode(sutil::Trackball::EyeFixed);
     trackball.setMoveSpeed(0.0f);
     trackball.setReferenceFrame(
         make_float3(1.0f, 0.0f, 0.0f),
@@ -434,6 +434,7 @@ void updateCameraState(const PathTracerState& state)
     if (state.params.agent_mode)
     {
         camera.setEye(state.params.agent.eye_position);
+		camera.setDirection(state.params.agent.direction);
         camera_changed = true;
     }
 }
@@ -463,7 +464,7 @@ void initAgent(PathTracerState& state)
 void agentMoveStep(Agent& agent)
 {
 	float maximum_distance = agent.h_distances[0]; // Maximum distance to check for obstacles
-	float rotation_angle = agent.h_rotations[0]; // Rotation angle corresponding to the maximum distance
+	float3 rotation_angle = agent.h_rotations[0]; // Rotation angle corresponding to the maximum distance
     for (int i = 1; i < 4; i++)
     {
 		if (agent.h_distances[i] > maximum_distance) // Check if this is the new maximum
@@ -529,18 +530,23 @@ void createContext(PathTracerState& state)
 
 void createModule(PathTracerState& state)
 {
-    OptixPayloadType payloadType = {};
+    OptixPayloadType payloadType[2] = {};
+
     // radiance prd
-    payloadType.numPayloadValues = sizeof(radiancePayloadSemantics) / sizeof(radiancePayloadSemantics[0]);
-    payloadType.payloadSemantics = radiancePayloadSemantics;
+    payloadType[0].numPayloadValues = sizeof(radiancePayloadSemantics) / sizeof(radiancePayloadSemantics[0]);
+    payloadType[0].payloadSemantics = radiancePayloadSemantics;
+
+    // agent prd
+    payloadType[1].numPayloadValues = sizeof(agentPayloadSemantics) / sizeof(agentPayloadSemantics[0]);
+    payloadType[1].payloadSemantics = agentPayloadSemantics;
 
     OptixModuleCompileOptions module_compile_options = {};
 #if OPTIX_DEBUG_DEVICE_CODE
     module_compile_options.optLevel = OPTIX_COMPILE_OPTIMIZATION_LEVEL_0;
     module_compile_options.debugLevel = OPTIX_COMPILE_DEBUG_LEVEL_FULL;
 #endif
-    module_compile_options.numPayloadTypes = 1;
-    module_compile_options.payloadTypes = &payloadType;
+    module_compile_options.numPayloadTypes = 2;
+    module_compile_options.payloadTypes = payloadType;
 
     state.pipeline_compile_options.usesMotionBlur = false;
     state.pipeline_compile_options.traversableGraphFlags = OPTIX_TRAVERSABLE_GRAPH_FLAG_ALLOW_SINGLE_GAS;
@@ -949,7 +955,7 @@ int main(int argc, char* argv[])
     // Parse command line options
     //
     std::string outfile;
-    std::string infile = sutil::sampleDataFilePath("Cube/cube.gltf");
+    std::string infile = sutil::sampleDataFilePath("UnrealLevel/Lvl_FirstPerson.gltf");
 
     for (int i = 1; i < argc; ++i)
     {
@@ -1075,6 +1081,14 @@ int main(int argc, char* argv[])
                         4 * sizeof(float),
                         cudaMemcpyDeviceToHost
 					));
+                    CUDA_SYNC_CHECK();
+
+                    CUDA_CHECK(cudaMemcpyAsync(
+                        reinterpret_cast<void*>(state.params.agent.h_rotations),
+                        reinterpret_cast<void*>(state.params.agent.d_rotations),
+                        4 * sizeof(float3),
+                        cudaMemcpyDeviceToHost
+                    ));
 					CUDA_SYNC_CHECK();
 
 					updateAgentState(state);

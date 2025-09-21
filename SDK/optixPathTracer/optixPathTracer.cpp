@@ -576,7 +576,7 @@ void writeWeightsToFile(const float* triangle_weights, const unsigned int* trian
     outFile << std::fixed << std::setprecision(5);
 
     // Calculate normalized values and write to file
-    for (int i = 0; i < scene_triangle_count; i++)
+    for (size_t i = 0; i < scene_triangle_count; i++)
     {
         float normalizedValue = 0.0f;
 
@@ -996,6 +996,44 @@ void createSBT(PathTracerState& state, const sutil::Scene& scene)
 }
 
 
+void displayAgentDistances(const float* agent_distances)
+{
+    constexpr std::chrono::duration<double> display_update_min_interval_time(0.1);
+    static int32_t                          total_subframe_count = 0;
+    static int32_t                          last_update_frames = 0;
+    static auto                             last_update_time = std::chrono::steady_clock::now();
+    static char                             display_text[128];
+
+    const auto cur_time = std::chrono::steady_clock::now();
+
+    sutil::beginFrameImGui();
+    last_update_frames++;
+
+    typedef std::chrono::duration<double, std::milli> durationMs;
+
+    if (cur_time - last_update_time > display_update_min_interval_time || total_subframe_count == 0)
+    {
+        sprintf(display_text,
+            "-- Agent Distances --\n"
+            "Forward: %.5f\n"
+            "Right: %.5f\n"
+            "Back: %.5f\n"
+            "Left: %.5f\n",
+            agent_distances[0],
+            agent_distances[1],
+            agent_distances[2],
+            agent_distances[3]
+        );
+
+        last_update_time = cur_time;
+        last_update_frames = 0;
+    }
+    sutil::displayText(display_text, 10.0f, 100.0f);
+    sutil::endFrameImGui();
+
+    ++total_subframe_count;
+}
+
 void cleanupState(PathTracerState& state)
 {
     OPTIX_CHECK(optixPipelineDestroy(state.pipeline));
@@ -1163,6 +1201,8 @@ int main(int argc, char* argv[])
 
                     sutil::displayStats(state_update_time, render_time, display_time);
 
+                    displayAgentDistances(state.params.agent.h_distances);
+
                     glfwSwapBuffers(window);
 
                     CUDA_CHECK(cudaMemcpyAsync(
@@ -1183,11 +1223,6 @@ int main(int argc, char* argv[])
 
 					updateAgentState(state);
 					updateCameraState(state);
-
-                    printf("(Host) Distance front: %.2f\n", state.params.agent.h_distances[0]);
-                    printf("(Host) Distance right: %.2f\n", state.params.agent.h_distances[1]);
-                    printf("(Host) Distance back: %.2f\n", state.params.agent.h_distances[2]);
-                    printf("(Host) Distance left: %.2f\n", state.params.agent.h_distances[3]);
 
                     if (state.params.agent.step_count >= state.params.agent.max_steps)
                     {
@@ -1216,6 +1251,8 @@ int main(int argc, char* argv[])
                         // and write to .txt file
                         std::string output_filename = std::string(getenv("USERPROFILE")) + "\\Desktop\\" + model_name + "_weights.txt";
                         writeWeightsToFile(state.params.h_triangle_weights, state.params.h_triangle_hits_count, state.params.scene_triangle_count, output_filename);
+
+                        std::cout << "Successfully written out to '" << output_filename << "'." << std::endl << "Exiting...\n" << std::endl;
 
                         return 0;
                     }

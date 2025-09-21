@@ -654,7 +654,7 @@ extern "C" __global__ void __raygen__agent()
         sin(rad) * dir.x + cos(rad) * dir.z
     );
 
-    params.agent.d_rotations[1] = rotated_dir;  // Store the distance for this ray (Left)
+    params.agent.d_rotations[1] = rotated_dir;  // Store the distance for this ray (Right)
 
     launchAgentRay(
         params.handle,
@@ -694,7 +694,7 @@ extern "C" __global__ void __raygen__agent()
         sin(rad) * dir.x + cos(rad) * dir.z
     );
 
-    params.agent.d_rotations[3] = rotated_dir;  // Store the distance for this ray (Right)
+    params.agent.d_rotations[3] = rotated_dir;  // Store the distance for this ray (Left)
 
     launchAgentRay(
         params.handle,
@@ -724,17 +724,17 @@ extern "C" __global__ void __closesthit__agent()
         float distance_front = traceDistance(params.handle, params.agent.eye_position, params.agent.d_rotations[0], 0.01f, 1e16f);
         params.agent.d_distances[0] = distance_front;
         break;
-    case 1u: // Left rotation
-        float distance_left = traceDistance(params.handle, params.agent.eye_position, params.agent.d_rotations[1], 0.01f, 1e16f);
-        params.agent.d_distances[1] = distance_left;
+    case 1u: // Right rotation
+        float distance_right = traceDistance(params.handle, params.agent.eye_position, params.agent.d_rotations[1], 0.01f, 1e16f);
+        params.agent.d_distances[1] = distance_right;
         break;
     case 2u: // Backward rotation
         float distance_back = traceDistance(params.handle, params.agent.eye_position, params.agent.d_rotations[2], 0.01f, 1e16f);
         params.agent.d_distances[2] = distance_back;
         break;
-    case 3u: // Right rotation
-        float distance_right = traceDistance(params.handle, params.agent.eye_position, params.agent.d_rotations[3], 0.01f, 1e16f);
-        params.agent.d_distances[3] = distance_right;
+    case 3u: // Left rotation
+        float distance_left = traceDistance(params.handle, params.agent.eye_position, params.agent.d_rotations[3], 0.01f, 1e16f);
+        params.agent.d_distances[3] = distance_left;
         break;
     default:
         printf("Invalid rotation step!\n");

@@ -455,44 +455,79 @@ void initAgent(PathTracerState& state)
     state.params.agent.march_distance = 0.2f; // 20% of the way to the ray target each step
     state.params.agent.fov = 90.0f;
     state.params.agent_mode = true;
+    state.params.agent.find_new_direction = true;
+	state.params.agent.obstacle_threshold_distance = 5.f; // Minimum distance to an obstacle before changing direction
+    state.params.agent.previous_maximum_distance_index = 0;
 }
 
 
 //-----------------------------------------------------------------------------------
 // Move the agent forward and randomly rotate it a bit
+// 1. Find new maximum distance direction.
+// 2. Keep moving towards the maximum distance direction until a threshold is reached.
+// 3. When the threshold is reached, rotate 180 degrees with a -/+ 90 degree deviation and
+//    find a new maximum distance direction.
+// 4. Repeat steps 1-3 until max steps reached.
 //-----------------------------------------------------------------------------------
 void agentMoveStep(Agent& agent)
 {
-	float maximum_distance = agent.h_distances[0]; // Maximum distance to check for obstacles
-	float3 rotation_angle = agent.h_rotations[0]; // Rotation angle corresponding to the maximum distance
-    for (int i = 1; i < 4; i++)
+    // Check if the minimum distance threshold has been reached
+    if (agent.find_new_direction)
     {
-		if (agent.h_distances[i] > maximum_distance) // Check if this is the new maximum
+        float maximum_distance = agent.h_distances[0]; // Maximum distance to check for obstacles
+        float3 rotation_angle = agent.h_rotations[0]; // Rotation angle corresponding to the maximum distance
+        agent.maximum_distance_index = 0;
+        agent.previous_maximum_distance_index = agent.maximum_distance_index;
+
+        for (int i = 1; i < 4; i++)
         {
-            maximum_distance = agent.h_distances[i];
-			rotation_angle = agent.h_rotations[i];
+            if (agent.h_distances[i] > maximum_distance) // Check if this is the new maximum
+            {
+                maximum_distance = agent.h_distances[i];
+                rotation_angle = agent.h_rotations[i];
+                agent.maximum_distance_index = i;
+            }
         }
-	}
 
-    // Generate a random fraction of 30� rotation
-    unsigned int seed = agent.step_count;
-    srand(seed);
-    float angle = 30.0f * rand();          // Random rotation angle
-    float rad = angle * M_PIf / 180.0f;    // Convert to radians
+		agent.find_new_direction = false;
+    }
 
-    // Rotate the current direction by the random angle around Y-axis
-    float3 new_dir = make_float3(
-        cos(rad) * agent.direction.x - sin(rad) * agent.direction.z,
-        agent.direction.y,
-        sin(rad) * agent.direction.x + cos(rad) * agent.direction.z
-    );
+
+    if ( (agent.h_distances[agent.maximum_distance_index] < agent.obstacle_threshold_distance) || (agent.h_distances[agent.previous_maximum_distance_index] < agent.obstacle_threshold_distance))
+    {
+        // Ensure the rotation is only around the Y-axis and is normalized
+        float3 new_rotation_angle = normalize(make_float3(agent.direction.x, 0.f, agent.direction.z));
+
+        // Generate a random fraction of 30� rotation
+        unsigned int seed = agent.step_count;
+        srand(seed);
+
+        // Rotate the agent by 180 degrees
+        new_rotation_angle = normalize(make_float3(-new_rotation_angle.x, 0.f, -new_rotation_angle.z));
+
+        // Add a andom rotation angle between -90 and 90 degrees ( rand range: [0, 1) )
+        float random_angle = (rand() / (float)RAND_MAX - 0.5f) * 180.0f;
+        float rad = random_angle * M_PIf / 180.0f;    // Convert to radians
+
+        // Rotate the current direction by the random angle around Y-axis
+        float3 new_dir = normalize(make_float3(
+            cos(rad) * new_rotation_angle.x - sin(rad) * new_rotation_angle.z,
+            new_rotation_angle.y,
+            sin(rad) * new_rotation_angle.x + cos(rad) * new_rotation_angle.z
+        ));
+
+        // Update the agent's facing direction (normalized)
+        agent.direction = normalize(make_float3(new_dir.x, 0.f, new_dir.z));
+
+        agent.find_new_direction = true;
+
+        return;
+    }
 
     // Move the agent along the XZ plane (keep Y constant) to march forward
-    agent.position += make_float3(new_dir.x, 0.f, new_dir.z) * agent.march_distance;
-
-    // Update the agent's facing direction (normalized)
-    agent.direction = normalize(make_float3(new_dir.x, 0.f, new_dir.z));
+    agent.position += agent.direction * (agent.h_distances[agent.maximum_distance_index] * agent.march_distance);
 }
+
 
 void updateAgentState(PathTracerState& state)
 {
@@ -1095,9 +1130,9 @@ int main(int argc, char* argv[])
 					updateCameraState(state);
 
                     printf("(Host) Distance front: %.2f\n", state.params.agent.h_distances[0]);
-                    printf("(Host) Distance left: %.2f\n", state.params.agent.h_distances[1]);
+                    printf("(Host) Distance right: %.2f\n", state.params.agent.h_distances[1]);
                     printf("(Host) Distance back: %.2f\n", state.params.agent.h_distances[2]);
-                    printf("(Host) Distance right: %.2f\n", state.params.agent.h_distances[3]);
+                    printf("(Host) Distance left: %.2f\n", state.params.agent.h_distances[3]);
 
                     ++state.params.subframe_index;
                 } while (!glfwWindowShouldClose(window));

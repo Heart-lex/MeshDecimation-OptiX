@@ -136,16 +136,16 @@ struct Agent
     float3       V;
     float3       W;
 
-    // (Device) distances to the nearest obstacle in each of 4 directions (Front, Left, Back, Right)
+    // (Device) distances to the nearest obstacle in each of 4 directions (Front, Right, Back, Left)
 	float* d_distances;
 
-    // (Host) distances to the nearest obstacle in each of 4 directions (Front, Left, Back, Right)
+    // (Host) distances to the nearest obstacle in each of 4 directions (Front, Right, Back, Left)
     float* h_distances;
 
-    // (Device) relative rotation angles to turn away from obstacles in each of 4 directions
+    // (Device) relative rotation angles to turn away from obstacles in each of 4 directions (Front, Right, Back, Left)
 	float3* d_rotations;
 
-    // (Host) relative rotation angles to turn away from obstacles in each of 4 directions
+    // (Host) relative rotation angles to turn away from obstacles in each of 4 directions (Front, Right, Back, Left)
     float3* h_rotations;
 
     float fov;
@@ -154,6 +154,11 @@ struct Agent
     float march_distance;
     float turn_angle;
 
+	int maximum_distance_index; // Index of the direction with the maximum distance
+    int previous_maximum_distance_index;
+    bool find_new_direction;
+	bool first_launch;
+	float obstacle_threshold_distance;
 };
 
 struct Params

@@ -406,13 +406,13 @@ extern "C" __global__ void __raygen__rg()
     params.accum_buffer[image_index] = make_float4(accum_color, 1.0f);
     params.frame_buffer[image_index] = make_color(accum_color);
 
-    if (idx.x == 0 && idx.y == 0 && params.accumulate_weights)
-    {
-        for (size_t i = 0; i < params.scene_triangle_count; i++)
-        {
-            printf("Triangle [%llu] : %.2f\n\n", i, params.triangle_weights[i]);
-        }
-    }
+    //if (idx.x == 0 && idx.y == 0 && params.accumulate_weights)
+    //{
+    //    for (size_t i = 0; i < params.scene_triangle_count; i++)
+    //    {
+    //        printf("Triangle [%llu] : %.2f\n\n", i, params.d_triangle_weights[i]);
+    //    }
+    //}
 
 }
 
@@ -442,7 +442,7 @@ __forceinline__ __device__ float computeWeight(float distance, float3 radiance)
     float luminance = 0.2126f * radiance.x + 0.7152f * radiance.y + 0.0722f * radiance.z;
 
     // Weight: higher for closer and brighter hits.
-    float weight = luminance / (safeDistance * safeDistance);
+    float weight = abs(luminance / (safeDistance * safeDistance));
 
     // Clamp to avoid extreme values
     return fminf(weight, 1);
@@ -602,7 +602,11 @@ extern "C" __global__ void __closesthit__radiance()
 
     if (params.accumulate_weights && params.agent.step_count < params.agent.max_steps)
     {
-        params.triangle_weights[prim_idx] += computeWeight(length(prd.origin - P), make_float3(1.f));
+		// Accumulate weight for the triangle that was hit
+        params.d_triangle_weights[prim_idx] += computeWeight(length(prd.origin - P), prd.radiance);
+
+        // Increment hit count for the triangle
+		params.d_triangle_hits_count[prim_idx] += 1u;
     }
 
     storeClosesthitRadiancePRD(prd);

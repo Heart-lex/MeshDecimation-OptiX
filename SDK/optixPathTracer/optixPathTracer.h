@@ -176,7 +176,11 @@ struct Params
     float3       V;
     float3       W;
     
-	float* triangle_weights; // one float weight per triangle in the scene   
+	float* d_triangle_weights; // (Device) one float weight per triangle in the scene   
+	unsigned int* d_triangle_hits_count; // (Device) one int count per triangle in the scene
+
+    float* h_triangle_weights; // (Host) one float weight per triangle in the scene   
+    unsigned int* h_triangle_hits_count; // (Host) one int count per triangle in the scene
 
     ParallelogramLight     light; // TODO: make light list
     OptixTraversableHandle handle;

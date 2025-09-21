@@ -88,7 +88,8 @@ int32_t samples_per_launch = 16;
 
 bool weight_accumulation = false;
 bool agent_mode = false;
-bool agent_moving = false;
+bool agent_step_move = false;
+bool agent_looping_move = false;
 
 //------------------------------------------------------------------------------
 //
@@ -230,7 +231,13 @@ static void keyCallback(GLFWwindow* window, int32_t key, int32_t /*scancode*/, i
     }
     else if (key == GLFW_KEY_N)
     {
-        agent_moving = true;
+        agent_looping_move = false;
+        agent_step_move = true;
+    }
+    else if (key == GLFW_KEY_L)
+    {
+        agent_looping_move = true;
+        agent_step_move = false;
     }
 }
 
@@ -276,9 +283,19 @@ void initLaunchParams(PathTracerState& state, const sutil::Scene& scene)
 
 	// Allocate space for one float weight per triangle in the scene
     CUDA_CHECK(cudaMalloc(
-        reinterpret_cast<void**>(&state.params.triangle_weights),
+        reinterpret_cast<void**>(&state.params.d_triangle_weights),
         state.params.scene_triangle_count * sizeof(float)
     ));
+
+    // Allocate space for one integer count per triangle in the scene
+    CUDA_CHECK(cudaMalloc(
+        reinterpret_cast<void**>(&state.params.d_triangle_hits_count),
+        state.params.scene_triangle_count * sizeof(unsigned int)
+    ));
+
+    CUDA_CHECK(cudaMallocHost(&state.params.h_triangle_weights, state.params.scene_triangle_count * sizeof(float)));
+
+    CUDA_CHECK(cudaMallocHost(&state.params.h_triangle_hits_count, state.params.scene_triangle_count * sizeof(unsigned int)));
 
     CUDA_CHECK(cudaMalloc(
         reinterpret_cast<void**>(&state.params.agent.d_distances),
@@ -455,8 +472,8 @@ void initAgent(PathTracerState& state)
     state.params.agent.direction = normalize(make_float3(0.0f, 0.0f, -1.0f));
 
     state.params.agent.step_count = 0;
-    state.params.agent.max_steps = 10;
-    state.params.agent.march_distance = 0.2f; // 20% of the way to the ray target each step
+    state.params.agent.max_steps = 10000;
+    state.params.agent.march_distance = 0.8f; // 80% of the way to the ray target each step
     state.params.agent.fov = 90.0f;
     state.params.agent_mode = true;
     state.params.agent.find_new_direction = true;
@@ -535,7 +552,7 @@ void agentMoveStep(Agent& agent)
 
 void updateAgentState(PathTracerState& state)
 {
-    if (state.params.agent_mode && /*state.params.agent.step_count < state.params.agent.max_steps &&*/ agent_moving)
+    if (state.params.agent_mode && state.params.agent.step_count < state.params.agent.max_steps && (agent_step_move || agent_looping_move))
     {
 		agentMoveStep(state.params.agent);
         state.params.agent.eye_position += state.params.agent.direction * state.params.agent.march_distance;
@@ -543,7 +560,36 @@ void updateAgentState(PathTracerState& state)
         camera_changed = true;
     }
 
-    agent_moving = false;
+    agent_step_move = false;
+}
+
+void writeWeightsToFile(const float* triangle_weights, const unsigned int* triangle_hit_counts, const unsigned int scene_triangle_count, const std::string& filepath)
+{
+    std::ofstream outFile(filepath);
+
+    if (!outFile.is_open())
+    {
+        std::cerr << "Error: Could not open file " << filepath << " for writing." << std::endl;
+        return;
+    }
+
+    outFile << std::fixed << std::setprecision(5);
+
+    // Calculate normalized values and write to file
+    for (int i = 0; i < scene_triangle_count; i++)
+    {
+        float normalizedValue = 0.0f;
+
+        // Avoid division by zero
+        if (triangle_hit_counts[i] != 0)
+        {
+            normalizedValue = triangle_weights[i] / static_cast<float>(triangle_hit_counts[i]);
+        }
+
+        outFile << normalizedValue << std::endl;
+    }
+
+    outFile.close();
 }
 
 
@@ -993,8 +1039,13 @@ int main(int argc, char* argv[])
     //
     // Parse command line options
     //
+    std::string model_filepath = "UnrealLevel/";
+	std::string model_extension = "Lvl_FirstPerson";
+	std::string model_name = ".gltf";
+    std::string filename = model_filepath + model_name + model_extension;
+
     std::string outfile;
-    std::string infile = sutil::sampleDataFilePath("UnrealLevel/Lvl_FirstPerson.gltf");
+    std::string infile = sutil::sampleDataFilePath(filename.c_str());
 
     for (int i = 1; i < argc; ++i)
     {
@@ -1137,6 +1188,37 @@ int main(int argc, char* argv[])
                     printf("(Host) Distance right: %.2f\n", state.params.agent.h_distances[1]);
                     printf("(Host) Distance back: %.2f\n", state.params.agent.h_distances[2]);
                     printf("(Host) Distance left: %.2f\n", state.params.agent.h_distances[3]);
+
+                    if (state.params.agent.step_count >= state.params.agent.max_steps)
+                    {
+                        std::cout << "Agent reached maximum step count of " << state.params.agent.max_steps << ". Stopping movement." << std::endl;
+                        state.params.agent_mode = false;
+
+                        // Memcpy for triangle weights
+                        CUDA_CHECK(cudaMemcpyAsync(
+                            reinterpret_cast<void*>(state.params.h_triangle_weights),
+                            reinterpret_cast<void*>(state.params.d_triangle_weights),
+                            state.params.scene_triangle_count * sizeof(float),
+                            cudaMemcpyDeviceToHost
+                        ));
+                        CUDA_SYNC_CHECK();
+
+                        // Memcpy for hit counts
+                        CUDA_CHECK(cudaMemcpyAsync(
+                            reinterpret_cast<void*>(state.params.h_triangle_hits_count),
+                            reinterpret_cast<void*>(state.params.d_triangle_hits_count),
+                            state.params.scene_triangle_count * sizeof(unsigned int),
+                            cudaMemcpyDeviceToHost
+                        ));
+                        CUDA_SYNC_CHECK();
+
+                        // Create buffer with triangle weights and hits
+                        // and write to .txt file
+                        std::string output_filename = std::string(getenv("USERPROFILE")) + "\\Desktop\\" + model_name + "_weights.txt";
+                        writeWeightsToFile(state.params.h_triangle_weights, state.params.h_triangle_hits_count, state.params.scene_triangle_count, output_filename);
+
+                        return 0;
+                    }
 
                     ++state.params.subframe_index;
                 } while (!glfwWindowShouldClose(window));

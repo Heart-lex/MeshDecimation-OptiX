@@ -1040,8 +1040,8 @@ int main(int argc, char* argv[])
     // Parse command line options
     //
     std::string model_filepath = "UnrealLevel/";
-	std::string model_extension = "Lvl_FirstPerson";
-	std::string model_name = ".gltf";
+	std::string model_name = "Lvl_FirstPerson";
+    std::string model_extension = ".gltf";
     std::string filename = model_filepath + model_name + model_extension;
 
     std::string outfile;

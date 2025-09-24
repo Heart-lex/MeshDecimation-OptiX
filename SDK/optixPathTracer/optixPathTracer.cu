@@ -603,7 +603,7 @@ extern "C" __global__ void __closesthit__radiance()
     if (params.accumulate_weights && params.agent.step_count < params.agent.max_steps)
     {
 		// Accumulate weight for the triangle that was hit
-        params.d_triangle_weights[prim_idx] += computeWeight(length(prd.origin - P), prd.radiance);
+        params.d_triangle_weights[prim_idx] += computeWeight(length(prd.origin - P), make_float3(1.f));
 
         // Increment hit count for the triangle
 		params.d_triangle_hits_count[prim_idx] += 1u;
@@ -642,7 +642,7 @@ extern "C" __global__ void __raygen__agent()
 
     launchAgentRay(
         params.handle,
-        params.agent.eye_position,
+        params.agent.eye_position + make_float3(0.f, -1.f, 0.f),
         rotated_dir,
         0.01f,  // tmin
         1e16f,   // tmax
@@ -662,7 +662,7 @@ extern "C" __global__ void __raygen__agent()
 
     launchAgentRay(
         params.handle,
-        params.agent.eye_position,
+        params.agent.eye_position + make_float3(0.f, -1.f, 0.f),
         rotated_dir,
         0.01f,  // tmin
         1e16f,   // tmax
@@ -682,7 +682,7 @@ extern "C" __global__ void __raygen__agent()
 
     launchAgentRay(
         params.handle,
-        params.agent.eye_position,
+        params.agent.eye_position + make_float3(0.f, -1.f, 0.f),
         rotated_dir,
         0.01f,  // tmin
         1e16f,   // tmax
@@ -702,7 +702,7 @@ extern "C" __global__ void __raygen__agent()
 
     launchAgentRay(
         params.handle,
-        params.agent.eye_position,
+        params.agent.eye_position + make_float3(0.f, -1.f, 0.f),
         rotated_dir,
         0.01f,  // tmin
         1e16f,   // tmax

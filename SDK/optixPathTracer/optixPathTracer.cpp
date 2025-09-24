@@ -313,6 +313,8 @@ void initLaunchParams(PathTracerState& state, const sutil::Scene& scene)
 
     state.params.accumulate_weights = true;
 
+    weight_accumulation = state.params.accumulate_weights;
+
     state.params.frame_buffer = nullptr;  // Will be set when output buffer is mapped
 
     state.params.samples_per_launch = samples_per_launch;
@@ -435,7 +437,6 @@ void initCameraState(const sutil::Scene& scene, const PathTracerState& state)
     camera = scene.camera();
 	camera.setEye(state.params.agent.eye_position);
 	//camera.setDirection(state.params.agent.direction);
-	camera.setFovY(state.params.agent.fov);
     camera_changed = true;
 
     trackball.setCamera(&camera);
@@ -1034,6 +1035,159 @@ void displayAgentDistances(const float* agent_distances)
     ++total_subframe_count;
 }
 
+//void loadObjScene(const std::string& filename, sutil::Scene& scene)
+//{
+//    tinyobj::attrib_t attrib;
+//    std::vector<tinyobj::shape_t> shapes;
+//    std::vector<tinyobj::material_t> materials;
+//    std::string warn, err;
+//    
+//    bool ret = tinyobj::LoadObj(&attrib, &shapes, &materials, &err, filename.c_str(), nullptr, true);
+//    if (!ret) throw std::runtime_error("Failed to load OBJ: " + err);
+//    if (!warn.empty()) std::cerr << "OBJ warning: " << warn << std::endl;
+//
+//    // --- Add materials to scene ---
+//    std::vector<int> material_map; // maps OBJ material index to scene material index
+//    if (materials.empty()) {
+//        MaterialData mat;
+//        mat.type = MaterialData::PBR;
+//        mat.pbr.base_color = make_float4(0.7f, 0.7f, 0.7f, 1.0f); // default gray
+//        mat.pbr.metallic = 0.0f;
+//        mat.pbr.roughness = 1.0f;
+//        scene.addMaterial(mat);
+//        material_map.push_back(0);
+//    }
+//    else {
+//        for (auto& m : materials) {
+//            MaterialData mat;
+//            mat.type = MaterialData::PBR;
+//            mat.pbr.base_color = make_float4(
+//                static_cast<float>(m.diffuse[0]),
+//                static_cast<float>(m.diffuse[1]),
+//                static_cast<float>(m.diffuse[2]),
+//                1.0f
+//            );
+//            mat.pbr.metallic = 0.0f;
+//            mat.pbr.roughness = 1.0f;
+//            int idx = static_cast<int>(scene.materials().size());
+//            scene.addMaterial(mat);
+//            material_map.push_back(idx);
+//        }
+//    }
+//
+//    // --- Add shapes as MeshGroups ---
+//    for (const auto& shape : shapes) {
+//        auto mesh = std::make_shared<sutil::Scene::MeshGroup>();
+//        mesh->name = shape.name;
+//
+//        std::vector<float3> vertices;
+//        std::vector<float3> normals;
+//        std::vector<uint3>  indices;
+//
+//        // Fill vertices
+//        for (size_t i = 0; i < attrib.vertices.size() / 3; ++i) {
+//            vertices.push_back(make_float3(
+//                attrib.vertices[3 * i + 0],
+//                attrib.vertices[3 * i + 1],
+//                attrib.vertices[3 * i + 2]
+//            ));
+//        }
+//
+//        // Fill normals if available
+//        if (!attrib.normals.empty()) {
+//            for (size_t i = 0; i < attrib.normals.size() / 3; ++i) {
+//                normals.push_back(make_float3(
+//                    attrib.normals[3 * i + 0],
+//                    attrib.normals[3 * i + 1],
+//                    attrib.normals[3 * i + 2]
+//                ));
+//            }
+//        }
+//
+//        // Fill indices
+//        for (size_t f = 0; f < shape.mesh.indices.size() / 3; ++f) {
+//            indices.push_back(make_uint3(
+//                shape.mesh.indices[3 * f + 0].vertex_index,
+//                shape.mesh.indices[3 * f + 1].vertex_index,
+//                shape.mesh.indices[3 * f + 2].vertex_index
+//            ));
+//        }
+//
+//        // Allocate GPU memory
+//        CUdeviceptr d_vertices = 0;
+//        CUdeviceptr d_normals = 0;
+//        CUdeviceptr d_indices = 0;
+//
+//        cudaMalloc(reinterpret_cast<void**>(&d_vertices), vertices.size() * sizeof(float3));
+//        cudaMemcpy(reinterpret_cast<void*>(d_vertices), vertices.data(), vertices.size() * sizeof(float3), cudaMemcpyHostToDevice);
+//
+//        if (!normals.empty()) {
+//            cudaMalloc(reinterpret_cast<void**>(&d_normals), normals.size() * sizeof(float3));
+//            cudaMemcpy(reinterpret_cast<void*>(d_normals), normals.data(), normals.size() * sizeof(float3), cudaMemcpyHostToDevice);
+//        }
+//
+//        cudaMalloc(reinterpret_cast<void**>(&d_indices), indices.size() * sizeof(uint3));
+//        cudaMemcpy(reinterpret_cast<void*>(d_indices), indices.data(), indices.size() * sizeof(uint3), cudaMemcpyHostToDevice);
+//
+//        // Setup GeometryData::TriangleMesh
+//        GeometryData::TriangleMesh triMesh;
+//        triMesh.positions.data = d_vertices;
+//        triMesh.positions.count = static_cast<unsigned int>(vertices.size());
+//        triMesh.positions.byte_stride = sizeof(float3);
+//        triMesh.positions.elmt_byte_size = sizeof(float3);
+//
+//        if (!normals.empty()) {
+//            triMesh.normals.data = d_normals;
+//            triMesh.normals.count = static_cast<unsigned int>(normals.size());
+//            triMesh.normals.byte_stride = sizeof(float3);
+//            triMesh.normals.elmt_byte_size = sizeof(float3);
+//        }
+//
+//        triMesh.indices.data = d_indices;
+//        triMesh.indices.count = static_cast<unsigned int>(indices.size());
+//        triMesh.indices.byte_stride = sizeof(uint3);
+//        triMesh.indices.elmt_byte_size = sizeof(uint3);
+//
+//        GeometryData geom;
+//        geom.setTriangleMesh(triMesh);
+//
+//        // Positions (always push, required)
+//        mesh->positions.push_back(triMesh.positions);
+//
+//        // Normals (push real or placeholder to keep counts aligned)
+//        if (!normals.empty())
+//            mesh->normals.push_back(triMesh.normals);
+//        else
+//            mesh->normals.push_back(BufferView<float3>()); // placeholder
+//
+//        // Colors (scene expects this, even if you don’t use them)
+//        mesh->colors.push_back(BufferView<Vec4f>()); // placeholder
+//
+//        // Texcoords (scene expects all num_texcoords slots aligned)
+//        for (int j = 0; j < GeometryData::num_texcoords; ++j)
+//        {
+//            mesh->texcoords[j].push_back(BufferView<Vec2f>()); // placeholder
+//        }
+//
+//        // Indices (always push, required)
+//        mesh->indices.push_back(triMesh.indices);
+//
+//        // Materials (ensure safe fallback)
+//        int mat_id = (!shape.mesh.material_ids.empty() && shape.mesh.material_ids[0] >= 0)
+//            ? shape.mesh.material_ids[0]
+//            : 0;
+//
+//        if (mat_id >= static_cast<int>(material_map.size()))
+//            mat_id = 0;
+//
+//        mesh->material_idx.push_back(material_map[mat_id]);
+//
+//
+//        // Add mesh to scene
+//        scene.addMesh(mesh);
+//    }
+//}
+
 void cleanupState(PathTracerState& state)
 {
     OPTIX_CHECK(optixPipelineDestroy(state.pipeline));
@@ -1077,8 +1231,8 @@ int main(int argc, char* argv[])
     //
     // Parse command line options
     //
-    std::string model_filepath = "UnrealLevel/";
-	std::string model_name = "Lvl_FirstPerson";
+    std::string model_filepath = "UnrealLevel/level_enclosed/";
+	std::string model_name = "level_enclosed";
     std::string model_extension = ".gltf";
     std::string filename = model_filepath + model_name + model_extension;
 
@@ -1127,6 +1281,7 @@ int main(int argc, char* argv[])
     {
         sutil::Scene scene;
         sutil::loadScene(infile, scene);
+		//loadObjScene(infile, scene);
         scene.finalize(false, RAY_TYPE_COUNT);
 
         OPTIX_CHECK(optixInit()); // Need to initialize function table

@@ -530,8 +530,10 @@ extern "C" __global__ void __closesthit__radiance()
     // Geometry and material data
     const GeometryData::TriangleMesh& mesh = rt_data->geometry_data.getTriangleMesh();
     const MaterialData& material = rt_data->material_data;
+    const unsigned int triangle_offset = rt_data->triangle_offset;  // Get the offset
 
     const int    prim_idx = optixGetPrimitiveIndex();
+    const int    global_triangle_idx = prim_idx + triangle_offset;  // Calculate global index
     const float3 ray_dir = optixGetWorldRayDirection();
     const int    vert_idx_offset = prim_idx * 3;
 
@@ -602,11 +604,11 @@ extern "C" __global__ void __closesthit__radiance()
 
     if (params.accumulate_weights && params.agent.step_count < params.agent.max_steps)
     {
-		// Accumulate weight for the triangle that was hit
-        params.d_triangle_weights[prim_idx] += computeWeight(length(prd.origin - P), make_float3(1.f));
+        // Accumulate weight for the triangle that was hit
+        params.d_triangle_weights[global_triangle_idx] += computeWeight(length(prd.origin - P), make_float3(1.f));
 
         // Increment hit count for the triangle
-		params.d_triangle_hits_count[prim_idx] += 1u;
+        params.d_triangle_hits_count[global_triangle_idx] += 1u;
     }
 
     storeClosesthitRadiancePRD(prd);

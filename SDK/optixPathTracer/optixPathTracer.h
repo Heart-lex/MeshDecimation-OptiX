@@ -206,10 +206,5 @@ struct HitGroupData
     // Data for building SBT
     GeometryData geometry_data;
     MaterialData material_data;
-
-    float4* vertices;
-    float3  emission_color;
-    float3  diffuse_color;
-
-
+	unsigned int triangle_offset;
 };

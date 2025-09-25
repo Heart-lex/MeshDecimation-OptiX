@@ -71,6 +71,7 @@
 #define STB_IMAGE_WRITE_IMPLEMENTATION
 #include <tinygltf/tiny_gltf.h>
 #include <sutil/Scene.h>
+#include <regex>
 
 bool resize_dirty = false;
 bool minimized = false;
@@ -90,6 +91,10 @@ bool weight_accumulation = false;
 bool agent_mode = false;
 bool agent_step_move = false;
 bool agent_looping_move = false;
+
+std::vector<std::string> mesh_names;
+std::vector<unsigned int> triangle_offsets;
+std::vector<unsigned int> triangle_counts;
 
 //------------------------------------------------------------------------------
 //
@@ -135,6 +140,8 @@ struct PathTracerState
 
     OptixShaderBindingTable        sbt = {};
     OptixShaderBindingTable        sbtAgent = {};
+
+
 };
 
 //------------------------------------------------------------------------------
@@ -919,6 +926,10 @@ void createSBT(PathTracerState& state, const sutil::Scene& scene)
 
 	// Debug: Store triangle offsets for each mesh part
 	std::vector<unsigned int> triangle_offsets;
+    std::vector<std::string> mesh_names;    
+    
+    // ADD THESE TWO VECTORS:
+    std::vector<unsigned int> triangle_counts;
 
     unsigned int global_triangle_offset = 0u;
 
@@ -954,6 +965,11 @@ void createSBT(PathTracerState& state, const sutil::Scene& scene)
             unsigned int current_primitive_triangles = mesh->indices[i].count / 3;
             state.params.scene_triangle_count += current_primitive_triangles;
 
+            triangle_counts.push_back(current_primitive_triangles);  // Store triangle count
+            mesh_names.push_back(mesh->name.empty() ?
+                ("mesh_" + std::to_string(instance->mesh_idx) + "_part_" + std::to_string(i)) :
+                (mesh->name + "_part_" + std::to_string(i)));
+
             // Store the offset for debugging
             triangle_offsets.push_back(global_triangle_offset);
 
@@ -963,6 +979,11 @@ void createSBT(PathTracerState& state, const sutil::Scene& scene)
 			agent_hitgroup_records.push_back(rec_agent);
         }
     }
+
+    ::triangle_offsets = triangle_offsets;  
+    ::triangle_counts = triangle_counts;    
+    ::mesh_names = mesh_names;
+
 
 	std::cout << "Total number of triangles in the scene: " << state.params.scene_triangle_count << std::endl;
 
@@ -1081,6 +1102,74 @@ void cleanupState(PathTracerState& state)
     CUDA_CHECK(cudaFree(reinterpret_cast<void*>(state.params.accum_buffer)));
     CUDA_CHECK(cudaFree(reinterpret_cast<void*>(state.d_params)));
 }
+
+std::string sanitizeFilename(const std::string& filename)
+{
+    std::string sanitized = filename;
+
+    // Replace invalid characters with underscores
+    const std::string invalid_chars = "<>:\"/\\|?*";
+    for (char& c : sanitized) {
+        if (invalid_chars.find(c) != std::string::npos || c < 32) {
+            c = '_';
+        }
+    }
+
+    // Remove multiple consecutive underscores and trim
+    std::regex multiple_underscores("_{2,}");
+    sanitized = std::regex_replace(sanitized, multiple_underscores, "_");
+
+    // Remove leading/trailing underscores
+    sanitized.erase(0, sanitized.find_first_not_of('_'));
+    sanitized.erase(sanitized.find_last_not_of('_') + 1);
+
+    if (sanitized.empty()) {
+        sanitized = "unnamed_mesh";
+    }
+
+    return sanitized;
+}
+
+
+void writeWeightsPerMeshUsingOffsets(
+    const PathTracerState& state,
+    const std::vector<unsigned int>& offsets,
+    const std::vector<unsigned int>& counts,
+    const std::vector<std::string>& names,
+    const std::string& model_name,
+    const std::string& base_output_path = ""
+) {
+    // Determine output path
+    std::string output_path = base_output_path.empty() ?
+        std::string(getenv("USERPROFILE")) + "\\Desktop" :
+        base_output_path;
+
+    // Create output directory
+    std::string output_dir = output_path + "\\" + model_name + "_weights\\";
+    std::string command = "mkdir \"" + output_dir + "\" 2>nul";
+    system(command.c_str());
+
+    std::cout << "Exporting mesh weights to: " << output_dir << std::endl;
+
+    // Export weights for each mesh part using offsets
+    for (size_t i = 0; i < offsets.size(); ++i) {
+        std::string sanitized_name = sanitizeFilename(names[i]);
+        std::string filename = output_dir + sanitized_name + "_weights.txt";
+
+        // Extract weights and hit counts for this specific mesh part using offsets
+        const float* mesh_weights = &state.params.h_triangle_weights[offsets[i]];
+        const unsigned int* mesh_hit_counts = &state.params.h_triangle_hits_count[offsets[i]];
+
+        // Use your existing writeWeightsToFile function!
+        writeWeightsToFile(mesh_weights, mesh_hit_counts, counts[i], filename);
+
+        std::cout << "✓ Exported " << counts[i] << " triangle weights for: "
+            << names[i] << " (offset: " << offsets[i] << ")" << std::endl;
+    }
+
+    std::cout << "✓ Successfully exported " << offsets.size() << " mesh weight files." << std::endl;
+}
+
 
 
 //------------------------------------------------------------------------------
@@ -1269,6 +1358,18 @@ int main(int argc, char* argv[])
                             cudaMemcpyDeviceToHost
                         ));
                         CUDA_SYNC_CHECK();
+
+                        // Export weights per mesh using your existing offset system!
+                        writeWeightsPerMeshUsingOffsets(
+                            state,
+                            triangle_offsets,
+                            triangle_counts,
+                            mesh_names,
+                            model_name
+                        );
+
+
+
 
                         // Create buffer with triangle weights and hits
                         // and write to .txt file

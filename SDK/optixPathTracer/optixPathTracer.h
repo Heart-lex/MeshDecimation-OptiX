@@ -33,6 +33,7 @@
 #include <vector_types.h>
 #include <cuda/GeometryData.h>
 #include <cuda/MaterialData.h>
+#include <vector>
 
 constexpr unsigned int RAY_TYPE_COUNT = 1;
 
@@ -182,6 +183,7 @@ struct Params
     float* h_triangle_weights; // (Host) one float weight per triangle in the scene   
     unsigned int* h_triangle_hits_count; // (Host) one int count per triangle in the scene
 
+
     ParallelogramLight     light; // TODO: make light list
     OptixTraversableHandle handle;
     Agent agent;
@@ -207,4 +209,5 @@ struct HitGroupData
     GeometryData geometry_data;
     MaterialData material_data;
 	unsigned int triangle_offset;
+
 };

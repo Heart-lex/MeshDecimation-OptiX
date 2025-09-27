@@ -473,9 +473,11 @@ __forceinline__ __device__ float3 getBaseColor(const GeometryData::TriangleMesh&
     uint3 tri;
     if (mesh.indices)
     {
-        tri = make_uint3(mesh.indices[prim_idx * 3 + 0],
-            mesh.indices[prim_idx * 3 + 1],
-            mesh.indices[prim_idx * 3 + 2]);
+        const uint16_t* indices = reinterpret_cast<const uint16_t*>(mesh.indices.data);
+
+        tri = make_uint3(indices[prim_idx * 3 + 0],
+            indices[prim_idx * 3 + 1],
+            indices[prim_idx * 3 + 2]);
     }
     else
     {
@@ -581,14 +583,18 @@ extern "C" __global__ void __closesthit__radiance()
     uint3 tri;
     if (mesh.indices)
     {
-        tri = make_uint3(mesh.indices[vert_idx_offset + 0],
-            mesh.indices[vert_idx_offset + 1],
-            mesh.indices[vert_idx_offset + 2]);
+        const uint16_t* indices = reinterpret_cast<const uint16_t*>(mesh.indices.data);
+
+        tri = make_uint3(indices[prim_idx * 3 + 0],
+            indices[prim_idx * 3 + 1],
+            indices[prim_idx * 3 + 2]);
     }
     else
     {
-        tri = make_uint3(vert_idx_offset, vert_idx_offset + 1, vert_idx_offset + 2);
+        const unsigned int base_idx = prim_idx * 3;
+        tri = make_uint3(base_idx, base_idx + 1, base_idx + 2);
     }
+
 
     const float3 v0 = mesh.positions[tri.x];
     const float3 v1 = mesh.positions[tri.y];

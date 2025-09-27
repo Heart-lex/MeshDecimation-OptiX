@@ -437,15 +437,15 @@ extern "C" __global__ void __miss__radiance()
 __forceinline__ __device__ double computeWeight(float distance)
 {
     // Minimum distance to avoid division by zero or extremely large weights
-    const double minDistance = 1e-3f;
+    const double minDistance = 1e-3;
     double safeDistance = fmaxf(distance, minDistance);
 
     // Compute weight based on distance (inverse square law)
     // This means closer objects contribute more, and weight decreases rapidly with distance
-    double weight = 1.0f / abs(log10(safeDistance * safeDistance));
+    double weight = 1.0 / log10(safeDistance * safeDistance);
 
     // Clamp the weight to 1 to prevent extreme values for very small distances
-    return fminf(weight, 1.0f);
+    return fminf(weight, 1.0);
 }
 
 template<typename T>
@@ -669,10 +669,14 @@ extern "C" __global__ void __closesthit__radiance()
     prd.radiance = light.emission * weight;
     prd.done = false;
 
+    const uint3 idx = optixGetLaunchIndex();
+
     if (params.accumulate_weights && params.agent.step_count < params.agent.max_steps)
     {
         // Accumulate weight for the triangle that was hit
         params.d_triangle_weights[global_triangle_idx] += foveated_weight * computeWeight(length(params.agent.eye_position - hit_point));
+
+        //printf("Triangle hit weight: %.10f\n", params.d_triangle_weights[global_triangle_idx]);
 
         // Increment hit count for the triangle
         params.d_triangle_hits_count[global_triangle_idx] += 1u;

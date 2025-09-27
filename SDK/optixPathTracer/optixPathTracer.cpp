@@ -318,9 +318,10 @@ void initLaunchParams(PathTracerState& state, const sutil::Scene& scene)
 
     CUDA_CHECK(cudaMallocHost(&state.params.agent.h_rotations, 4 * sizeof(float3)));
 
-	state.params.total_rays_launched = state.params.width * state.params.height * samples_per_launch;
+    state.params.accumulate_weights = false;
 
-    state.params.accumulate_weights = true;
+    // Calculate the total number of rays that will be launched during the entire rendering process
+    state.params.total_rays_launched = state.params.width * state.params.height * samples_per_launch;
 
     weight_accumulation = state.params.accumulate_weights;
 
@@ -568,6 +569,7 @@ void updateAgentState(PathTracerState& state)
         state.params.agent.eye_position += state.params.agent.direction * state.params.agent.march_distance;
         state.params.agent.step_count++;
         camera_changed = true;
+        weight_accumulation = true;
     }
 
     agent_step_move = false;
@@ -587,10 +589,11 @@ void writeWeightsToFile(const double* triangle_weights, const unsigned int* tria
 
     for (size_t i = 0; i < scene_triangle_count; i++)
     {
-        double value = 0.0f;
+        double value = 0.0;
 
         if (triangle_hit_counts[i] > 0)
         {
+			printf("Triangle %zu: Weight = %f, Hit Count = %u\n", i, triangle_weights[i], triangle_hit_counts[i]);
             value = triangle_weights[i] / (static_cast<double>(triangle_hit_counts[i] / total_ray_launches));
         }
 
@@ -604,7 +607,7 @@ void writeWeightsToFile(const double* triangle_weights, const unsigned int* tria
             value = 0.f;
 		}
 
-        outFile << abs(value) << std::endl;
+        outFile << value << std::endl;
     }
 
     outFile.close();
@@ -1005,8 +1008,6 @@ void createSBT(PathTracerState& state, const sutil::Scene& scene)
         std::cout << "Mesh part " << i+1 << " starts at triangle " << triangle_offsets[i] << std::endl;
     }
 
-	std::cout << "Total rays that will be launched: " << state.params.total_rays_launched << std::endl;
-
     const size_t hitgroup_record_size = sizeof(HitGroupRecord);
     CUDA_CHECK(cudaMalloc(
         reinterpret_cast<void**>(&d_hitgroup_records),
@@ -1176,11 +1177,11 @@ void writeWeightsPerMeshUsingOffsets(
         // Use your existing writeWeightsToFile function!
         writeWeightsToFile(mesh_weights, mesh_hit_counts, counts[i], total_ray_launches, filename);
 
-        std::cout << "✓ Exported " << counts[i] << " triangle weights for: "
+        std::cout << "-- Exported " << counts[i] << " triangle weights for: "
             << names[i] << " (offset: " << offsets[i] << ")" << std::endl;
     }
 
-    std::cout << "✓ Successfully exported " << offsets.size() << " mesh weight files." << std::endl;
+    std::cout << "-- Successfully exported " << offsets.size() << " mesh weight files." << std::endl;
 }
 
 
@@ -1271,6 +1272,7 @@ int main(int argc, char* argv[])
         createSBT(state, scene);
         initLaunchParams(state, scene);
 
+        std::cout << "Total rays that will be launched: " << state.params.total_rays_launched << std::endl;
 
         if (outfile.empty())
         {
@@ -1316,6 +1318,10 @@ int main(int argc, char* argv[])
                     t0 = t1;
 
                     launchSubframe(output_buffer, state);
+
+					// Disable accumulation after camera or agent movement
+					weight_accumulation = false;
+
                     t1 = std::chrono::steady_clock::now();
                     render_time += t1 - t0;
                     t0 = t1;

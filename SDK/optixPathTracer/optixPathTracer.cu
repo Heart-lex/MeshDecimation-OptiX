@@ -253,6 +253,7 @@ static __forceinline__ __device__ bool traceOcclusion(
 {
     // We are only casting probe rays so no shader invocation is needed
     optixTraverse(
+        PAYLOAD_TYPE_RADIANCE,
         handle,
         ray_origin,
         ray_direction,
@@ -262,7 +263,7 @@ static __forceinline__ __device__ bool traceOcclusion(
         OPTIX_RAY_FLAG_TERMINATE_ON_FIRST_HIT | OPTIX_RAY_FLAG_DISABLE_ANYHIT,
         0,                         // SBT offset
         RAY_TYPE_COUNT,            // SBT stride
-        0                          // missSBTIndex
+        0                         // missSBTIndex
     );
     return optixHitObjectIsHit();
 }
@@ -301,7 +302,7 @@ static __forceinline__ __device__ void launchAgentRay(
         prd.done = u8;
 }
 
-// Returns distance to object if ray is occluded, else -1
+// Returns distance to object if ray is occluded
 static __forceinline__ __device__ float traceDistance(
     OptixTraversableHandle handle,
     float3                 ray_origin,
@@ -433,15 +434,15 @@ extern "C" __global__ void __miss__radiance()
 
 // Compute a weight based on distance for a given hit.
 // Closer hits have higher weight, farther hits have lower weight.
-__forceinline__ __device__ float computeWeight(float distance)
+__forceinline__ __device__ double computeWeight(float distance)
 {
     // Minimum distance to avoid division by zero or extremely large weights
-    const float minDistance = 1e-3f;
-    float safeDistance = fmaxf(distance, minDistance);
+    const double minDistance = 1e-3f;
+    double safeDistance = fmaxf(distance, minDistance);
 
     // Compute weight based on distance (inverse square law)
     // This means closer objects contribute more, and weight decreases rapidly with distance
-    float weight = 1.0f / abs(log10(safeDistance * safeDistance));
+    double weight = 1.0f / abs(log10(safeDistance * safeDistance));
 
     // Clamp the weight to 1 to prevent extreme values for very small distances
     return fminf(weight, 1.0f);
@@ -469,7 +470,6 @@ __forceinline__ __device__ float3 getBaseColor(const GeometryData::TriangleMesh&
 {
     const unsigned int prim_idx = optixGetPrimitiveIndex();
 
-    // INDICES 
     uint3 tri;
     if (mesh.indices)
     {
@@ -480,7 +480,6 @@ __forceinline__ __device__ float3 getBaseColor(const GeometryData::TriangleMesh&
     else
     {
         const unsigned int base_idx = prim_idx * 3;
-
         tri = make_uint3(base_idx, base_idx + 1, base_idx + 2);
     }
 
@@ -522,43 +521,43 @@ __forceinline__ __device__ float3 getBaseColor(const GeometryData::TriangleMesh&
     return baseColor;
 }
 
-__forceinline__ __device__ float calculateFoveatedWeight(
+__forceinline__ __device__ double calculateFoveatedWeight(
     float3 agent_direction,
     float3 ray_direction)
 {
     // Human vision parameters (in radians)
-    const float foveal_angle = 0.0349f;      // ~2 degrees (sharp vision)
-    const float parafoveal_angle = 0.0873f;  // ~5 degrees (good vision)  
-    const float peripheral_angle = 0.7854f;  // ~45 degrees (motion detection)
+    const double foveal_angle = 0.0349;      // ~2 degrees (sharp vision)
+    const double parafoveal_angle = 0.0873;  // ~5 degrees (good vision)  
+    const double peripheral_angle = 0.7854;  // ~45 degrees (motion detection)
 
-    float cosine_similarity = dot(normalize(agent_direction), normalize(ray_direction));
+    double cosine_similarity = dot(normalize(agent_direction), normalize(ray_direction));
 
     // Convert angles to cosine thresholds
-    float foveal_cos = cosf(foveal_angle);
-    float parafoveal_cos = cosf(parafoveal_angle);
-    float peripheral_cos = cosf(peripheral_angle);
+    double foveal_cos = cosf(foveal_angle);
+    double parafoveal_cos = cosf(parafoveal_angle);
+    double peripheral_cos = cosf(peripheral_angle);
 
     if (cosine_similarity >= foveal_cos)
     {
         // Foveal region - highest weight (1.0)
-        return 1.0f;
+        return 1.0;
     }
     else if (cosine_similarity >= parafoveal_cos)
     {
         // Parafoveal region - medium weight (0.5 to 1.0)
-        float t = (cosine_similarity - parafoveal_cos) / (foveal_cos - parafoveal_cos);
-        return 0.5f + 0.5f * t;
+        double t = (cosine_similarity - parafoveal_cos) / (foveal_cos - parafoveal_cos);
+        return 0.5 + 0.5 * t;
     }
     else if (cosine_similarity >= peripheral_cos)
     {
         // Peripheral region - low weight (0.1 to 0.5)
-        float t = (cosine_similarity - peripheral_cos) / (parafoveal_cos - peripheral_cos);
-        return 0.1f + 0.4f * t;
+        double t = (cosine_similarity - peripheral_cos) / (parafoveal_cos - peripheral_cos);
+        return 0.1 + 0.4 * t;
     }
     else
     {
         // Outside field of view
-        return 0.05f;
+        return 0.05;
     }
 }
 
@@ -577,17 +576,30 @@ extern "C" __global__ void __closesthit__radiance()
     const int    prim_idx = optixGetPrimitiveIndex();
     const int    global_triangle_idx = prim_idx + triangle_offset;  // Calculate global index
     const float3 ray_dir = optixGetWorldRayDirection();
-    const int    vert_idx_offset = prim_idx * 3;
+    const unsigned int    vert_idx_offset = prim_idx * 3;
 
-    const float3 v0 = make_float3(mesh.indices[vert_idx_offset + 0]);
-    const float3 v1 = make_float3(mesh.indices[vert_idx_offset + 1]);
-    const float3 v2 = make_float3(mesh.indices[vert_idx_offset + 2]);
+    uint3 tri;
+    if (mesh.indices)
+    {
+        tri = make_uint3(mesh.indices[vert_idx_offset + 0],
+            mesh.indices[vert_idx_offset + 1],
+            mesh.indices[vert_idx_offset + 2]);
+    }
+    else
+    {
+        tri = make_uint3(vert_idx_offset, vert_idx_offset + 1, vert_idx_offset + 2);
+    }
+
+    const float3 v0 = mesh.positions[tri.x];
+    const float3 v1 = mesh.positions[tri.y];
+    const float3 v2 = mesh.positions[tri.z];
+
     const float3 N_0 = normalize(cross(v1 - v0, v2 - v0));
 
     // Cosine similarity between the ray direction and the camera direction
     // This can be used to weight contributions based on alignment with the camera view.
     // Agent has the same direction as the camera.
-	const float foveated_weight = calculateFoveatedWeight(params.agent.direction, ray_dir);
+	const double foveated_weight = calculateFoveatedWeight(params.agent.direction, ray_dir);
 
     const float3 N = faceforward(N_0, -ray_dir, N_0);
     const float3 P = optixGetWorldRayOrigin() + optixGetRayTmax() * ray_dir;

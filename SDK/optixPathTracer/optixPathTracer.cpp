@@ -291,18 +291,18 @@ void initLaunchParams(PathTracerState& state, const sutil::Scene& scene)
 	// Allocate space for one float weight per triangle in the scene
     CUDA_CHECK(cudaMalloc(
         reinterpret_cast<void**>(&state.params.d_triangle_weights),
-        state.params.scene_triangle_count * sizeof(float)
+        state.params.scene_triangle_count * sizeof(double)
     ));
 
     // Allocate space for one integer count per triangle in the scene
     CUDA_CHECK(cudaMalloc(
         reinterpret_cast<void**>(&state.params.d_triangle_hits_count),
-        state.params.scene_triangle_count * sizeof(unsigned int)
+        state.params.scene_triangle_count * sizeof(unsigned long)
     ));
 
-    CUDA_CHECK(cudaMallocHost(&state.params.h_triangle_weights, state.params.scene_triangle_count * sizeof(float)));
+    CUDA_CHECK(cudaMallocHost(&state.params.h_triangle_weights, state.params.scene_triangle_count * sizeof(double)));
 
-    CUDA_CHECK(cudaMallocHost(&state.params.h_triangle_hits_count, state.params.scene_triangle_count * sizeof(unsigned int)));
+    CUDA_CHECK(cudaMallocHost(&state.params.h_triangle_hits_count, state.params.scene_triangle_count * sizeof(unsigned long)));
 
     CUDA_CHECK(cudaMalloc(
         reinterpret_cast<void**>(&state.params.agent.d_distances),
@@ -317,6 +317,8 @@ void initLaunchParams(PathTracerState& state, const sutil::Scene& scene)
     CUDA_CHECK(cudaMallocHost(&state.params.agent.h_distances, 4 * sizeof(float)));
 
     CUDA_CHECK(cudaMallocHost(&state.params.agent.h_rotations, 4 * sizeof(float3)));
+
+	state.params.total_rays_launched = state.params.width * state.params.height * samples_per_launch;
 
     state.params.accumulate_weights = true;
 
@@ -471,7 +473,7 @@ void updateCameraState(const PathTracerState& state)
 void initAgent(PathTracerState& state)
 {
     // Place the agent in the center of the scene
-    state.params.agent.position = make_float3(15.0f, 0.0f, 10.0f);
+    state.params.agent.position = make_float3(0.0f, 0.0f, 0.0f);
 
     // Place the camera slightly above the agent's position
     state.params.agent.eye_position = state.params.agent.position + make_float3(0.0f, 1.5f, 0.0f);
@@ -571,7 +573,7 @@ void updateAgentState(PathTracerState& state)
     agent_step_move = false;
 }
 
-void writeWeightsToFile(const float* triangle_weights, const unsigned int* triangle_hit_counts, const unsigned int scene_triangle_count, const std::string& filepath)
+void writeWeightsToFile(const double* triangle_weights, const unsigned int* triangle_hit_counts, const unsigned long scene_triangle_count, const unsigned long total_ray_launches, const std::string& filepath)
 {
     std::ofstream outFile(filepath);
 
@@ -581,20 +583,28 @@ void writeWeightsToFile(const float* triangle_weights, const unsigned int* trian
         return;
     }
 
-    outFile << std::fixed << std::setprecision(5);
+    outFile << std::fixed << std::setprecision(10);
 
-    // Calculate normalized values and write to file
     for (size_t i = 0; i < scene_triangle_count; i++)
     {
-        float normalizedValue = 0.0f;
+        double value = 0.0f;
 
-        // Avoid division by zero
-        if (triangle_hit_counts[i] != 0)
+        if (triangle_hit_counts[i] > 0)
         {
-            normalizedValue = triangle_weights[i] / static_cast<float>(triangle_hit_counts[i]);
+            value = triangle_weights[i] / (static_cast<double>(triangle_hit_counts[i] / total_ray_launches));
         }
 
-        outFile << normalizedValue << std::endl;
+        if (value > 1.f)
+        {
+            value = 1.f;
+		}
+
+        if (value < 0.f)
+        {
+            value = 0.f;
+		}
+
+        outFile << abs(value) << std::endl;
     }
 
     outFile.close();
@@ -918,7 +928,7 @@ void createSBT(PathTracerState& state, const sutil::Scene& scene)
 	CUdeviceptr  d_hitgroup_records;
     CUdeviceptr  d_agent_hitgroup_records;
 
-    state.params.scene_triangle_count = 0u;
+    state.params.scene_triangle_count = 0ul;
     
 	// Create hitgroup records for each mesh in the scene
     std::vector<HitGroupRecord> hitgroup_records;
@@ -994,6 +1004,8 @@ void createSBT(PathTracerState& state, const sutil::Scene& scene)
     {
         std::cout << "Mesh part " << i+1 << " starts at triangle " << triangle_offsets[i] << std::endl;
     }
+
+	std::cout << "Total rays that will be launched: " << state.params.total_rays_launched << std::endl;
 
     const size_t hitgroup_record_size = sizeof(HitGroupRecord);
     CUDA_CHECK(cudaMalloc(
@@ -1135,6 +1147,7 @@ void writeWeightsPerMeshUsingOffsets(
     const PathTracerState& state,
     const std::vector<unsigned int>& offsets,
     const std::vector<unsigned int>& counts,
+	const unsigned long total_ray_launches,
     const std::vector<std::string>& names,
     const std::string& model_name,
     const std::string& base_output_path = ""
@@ -1157,11 +1170,11 @@ void writeWeightsPerMeshUsingOffsets(
         std::string filename = output_dir + sanitized_name + "_weights.txt";
 
         // Extract weights and hit counts for this specific mesh part using offsets
-        const float* mesh_weights = &state.params.h_triangle_weights[offsets[i]];
+        const double* mesh_weights = &state.params.h_triangle_weights[offsets[i]];
         const unsigned int* mesh_hit_counts = &state.params.h_triangle_hits_count[offsets[i]];
 
         // Use your existing writeWeightsToFile function!
-        writeWeightsToFile(mesh_weights, mesh_hit_counts, counts[i], filename);
+        writeWeightsToFile(mesh_weights, mesh_hit_counts, counts[i], total_ray_launches, filename);
 
         std::cout << "✓ Exported " << counts[i] << " triangle weights for: "
             << names[i] << " (offset: " << offsets[i] << ")" << std::endl;
@@ -1188,8 +1201,8 @@ int main(int argc, char* argv[])
     //
     // Parse command line options
     //
-    std::string model_filepath = "UnrealLevel/level_enclosed_v2/";
-	std::string model_name = "level_enclosed_v2";
+    std::string model_filepath = "Sponza/";
+	std::string model_name = "sponza";
     std::string model_extension = ".gltf";
     std::string filename = model_filepath + model_name + model_extension;
 
@@ -1345,7 +1358,7 @@ int main(int argc, char* argv[])
                         CUDA_CHECK(cudaMemcpyAsync(
                             reinterpret_cast<void*>(state.params.h_triangle_weights),
                             reinterpret_cast<void*>(state.params.d_triangle_weights),
-                            state.params.scene_triangle_count * sizeof(float),
+                            state.params.scene_triangle_count * sizeof(double),
                             cudaMemcpyDeviceToHost
                         ));
                         CUDA_SYNC_CHECK();
@@ -1364,17 +1377,15 @@ int main(int argc, char* argv[])
                             state,
                             triangle_offsets,
                             triangle_counts,
+                            state.params.total_rays_launched,
                             mesh_names,
                             model_name
                         );
 
-
-
-
                         // Create buffer with triangle weights and hits
                         // and write to .txt file
                         std::string output_filename = std::string(getenv("USERPROFILE")) + "\\Desktop\\" + model_name + "_weights.txt";
-                        writeWeightsToFile(state.params.h_triangle_weights, state.params.h_triangle_hits_count, state.params.scene_triangle_count, output_filename);
+                        writeWeightsToFile(state.params.h_triangle_weights, state.params.h_triangle_hits_count, state.params.scene_triangle_count, state.params.total_rays_launched, output_filename);
 
                         std::cout << "Successfully written out to '" << output_filename << "'." << std::endl << "Exiting...\n" << std::endl;
 

@@ -1,4 +1,4 @@
-/*
+﻿/*
 
  * SPDX-FileCopyrightText: Copyright (c) 2019 - 2024  NVIDIA CORPORATION & AFFILIATES. All rights reserved.
  * SPDX-License-Identifier: BSD-3-Clause
@@ -431,21 +431,20 @@ extern "C" __global__ void __miss__radiance()
     storeMissRadiancePRD(prd);
 }
 
-// Compute a weight based on distance and radiance for a given hit.
-__forceinline__ __device__ float computeWeight(float distance, float3 radiance)
+// Compute a weight based on distance for a given hit.
+// Closer hits have higher weight, farther hits have lower weight.
+__forceinline__ __device__ float computeWeight(float distance)
 {
-    // Avoid division by zero or very small distances
+    // Minimum distance to avoid division by zero or extremely large weights
     const float minDistance = 1e-3f;
     float safeDistance = fmaxf(distance, minDistance);
 
-    // Compute luminance (perceptual brightness) from RGB radiance
-    float luminance = 0.2126f * radiance.x + 0.7152f * radiance.y + 0.0722f * radiance.z;
+    // Compute weight based on distance (inverse square law)
+    // This means closer objects contribute more, and weight decreases rapidly with distance
+    float weight = 1.0f / abs(log10(safeDistance * safeDistance));
 
-    // Weight: higher for closer and brighter hits.
-    float weight = abs(luminance / (safeDistance * safeDistance));
-
-    // Clamp to avoid extreme values
-    return fminf(weight, 1);
+    // Clamp the weight to 1 to prevent extreme values for very small distances
+    return fminf(weight, 1.0f);
 }
 
 template<typename T>
@@ -474,7 +473,9 @@ __forceinline__ __device__ float3 getBaseColor(const GeometryData::TriangleMesh&
     uint3 tri;
     if (mesh.indices)
     {
-        tri = make_uint3(mesh.positions[prim_idx]);
+        tri = make_uint3(mesh.indices[prim_idx * 3 + 0],
+            mesh.indices[prim_idx * 3 + 1],
+            mesh.indices[prim_idx * 3 + 2]);
     }
     else
     {
@@ -521,6 +522,47 @@ __forceinline__ __device__ float3 getBaseColor(const GeometryData::TriangleMesh&
     return baseColor;
 }
 
+__forceinline__ __device__ float calculateFoveatedWeight(
+    float3 agent_direction,
+    float3 ray_direction)
+{
+    // Human vision parameters (in radians)
+    const float foveal_angle = 0.0349f;      // ~2 degrees (sharp vision)
+    const float parafoveal_angle = 0.0873f;  // ~5 degrees (good vision)  
+    const float peripheral_angle = 0.7854f;  // ~45 degrees (motion detection)
+
+    float cosine_similarity = dot(normalize(agent_direction), normalize(ray_direction));
+
+    // Convert angles to cosine thresholds
+    float foveal_cos = cosf(foveal_angle);
+    float parafoveal_cos = cosf(parafoveal_angle);
+    float peripheral_cos = cosf(peripheral_angle);
+
+    if (cosine_similarity >= foveal_cos)
+    {
+        // Foveal region - highest weight (1.0)
+        return 1.0f;
+    }
+    else if (cosine_similarity >= parafoveal_cos)
+    {
+        // Parafoveal region - medium weight (0.5 to 1.0)
+        float t = (cosine_similarity - parafoveal_cos) / (foveal_cos - parafoveal_cos);
+        return 0.5f + 0.5f * t;
+    }
+    else if (cosine_similarity >= peripheral_cos)
+    {
+        // Peripheral region - low weight (0.1 to 0.5)
+        float t = (cosine_similarity - peripheral_cos) / (parafoveal_cos - peripheral_cos);
+        return 0.1f + 0.4f * t;
+    }
+    else
+    {
+        // Outside field of view
+        return 0.05f;
+    }
+}
+
+
 extern "C" __global__ void __closesthit__radiance()
 {
     optixSetPayloadTypes(PAYLOAD_TYPE_RADIANCE);
@@ -542,14 +584,21 @@ extern "C" __global__ void __closesthit__radiance()
     const float3 v2 = make_float3(mesh.indices[vert_idx_offset + 2]);
     const float3 N_0 = normalize(cross(v1 - v0, v2 - v0));
 
+    // Cosine similarity between the ray direction and the camera direction
+    // This can be used to weight contributions based on alignment with the camera view.
+    // Agent has the same direction as the camera.
+	const float foveated_weight = calculateFoveatedWeight(params.agent.direction, ray_dir);
 
     const float3 N = faceforward(N_0, -ray_dir, N_0);
     const float3 P = optixGetWorldRayOrigin() + optixGetRayTmax() * ray_dir;
 
     RadiancePRD prd = loadClosesthitRadiancePRD();
 
+	// Store the hit point for weight accumulation
+	const float3 hit_point = P;
+
     if (prd.depth == 0)
-        prd.emitted = getBaseColor(mesh, material);
+        prd.emitted = getBaseColor(mesh, material)/* * foveated_weight*/;
     else
         prd.emitted = make_float3(0.0f);
 
@@ -605,7 +654,7 @@ extern "C" __global__ void __closesthit__radiance()
     if (params.accumulate_weights && params.agent.step_count < params.agent.max_steps)
     {
         // Accumulate weight for the triangle that was hit
-        params.d_triangle_weights[global_triangle_idx] += computeWeight(length(prd.origin - P), make_float3(1.f));
+        params.d_triangle_weights[global_triangle_idx] += foveated_weight * computeWeight(length(params.agent.eye_position - hit_point));
 
         // Increment hit count for the triangle
         params.d_triangle_hits_count[global_triangle_idx] += 1u;

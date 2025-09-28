@@ -93,8 +93,8 @@ bool agent_step_move = false;
 bool agent_looping_move = false;
 
 std::vector<std::string> mesh_names;
-std::vector<unsigned int> triangle_offsets;
-std::vector<unsigned int> triangle_counts;
+std::vector<unsigned long> triangle_offsets;
+std::vector<unsigned long> triangle_counts;
 
 //------------------------------------------------------------------------------
 //
@@ -296,13 +296,21 @@ void initLaunchParams(PathTracerState& state, const sutil::Scene& scene)
 
     // Allocate space for one integer count per triangle in the scene
     CUDA_CHECK(cudaMalloc(
-        reinterpret_cast<void**>(&state.params.d_triangle_hits_count),
+        reinterpret_cast<void**>(&state.params.d_triangle_not_occluded_hits_count),
+        state.params.scene_triangle_count * sizeof(unsigned long)
+    ));
+
+        // Allocate space for one integer count per triangle in the scene
+    CUDA_CHECK(cudaMalloc(
+        reinterpret_cast<void**>(&state.params.d_triangle_total_hits_count),
         state.params.scene_triangle_count * sizeof(unsigned long)
     ));
 
     CUDA_CHECK(cudaMallocHost(&state.params.h_triangle_weights, state.params.scene_triangle_count * sizeof(double)));
 
-    CUDA_CHECK(cudaMallocHost(&state.params.h_triangle_hits_count, state.params.scene_triangle_count * sizeof(unsigned long)));
+    CUDA_CHECK(cudaMallocHost(&state.params.h_triangle_not_occluded_hits_count, state.params.scene_triangle_count * sizeof(unsigned long)));
+
+    CUDA_CHECK(cudaMallocHost(&state.params.h_triangle_total_hits_count, state.params.scene_triangle_count * sizeof(unsigned long)));
 
     CUDA_CHECK(cudaMalloc(
         reinterpret_cast<void**>(&state.params.agent.d_distances),
@@ -575,7 +583,7 @@ void updateAgentState(PathTracerState& state)
     agent_step_move = false;
 }
 
-void writeWeightsToFile(const double* triangle_weights, const unsigned int* triangle_hit_counts, const unsigned long scene_triangle_count, const unsigned long total_ray_launches, const std::string& filepath)
+void writeWeightsToFile(const double* triangle_weights, const unsigned long* triangle_total_hits_count, const unsigned long* triangle_not_occluded_hits_count, const unsigned long scene_triangle_count, const std::string& filepath)
 {
     std::ofstream outFile(filepath);
 
@@ -591,20 +599,20 @@ void writeWeightsToFile(const double* triangle_weights, const unsigned int* tria
     {
         double value = 0.0;
 
-        if (triangle_hit_counts[i] > 0)
+        if (triangle_total_hits_count[i] > 0 && triangle_not_occluded_hits_count[i] > 0)
         {
-			printf("Triangle %zu: Weight = %f, Hit Count = %u\n", i, triangle_weights[i], triangle_hit_counts[i]);
-            value = triangle_weights[i] / (static_cast<double>(triangle_hit_counts[i] / total_ray_launches));
+            printf("Triangle %zu: Weight = %f, Total Hits Count = %u, Total Not-Occluded Hits Count = %u\n", i, triangle_weights[i], triangle_total_hits_count[i], triangle_not_occluded_hits_count[i]);
+            value = triangle_weights[i] * (static_cast<double>(triangle_not_occluded_hits_count[i]) / static_cast<double>(triangle_total_hits_count[i]));
         }
 
-        if (value > 1.f)
+        if (value > 1.0)
         {
-            value = 1.f;
+            value = 1.0;
 		}
 
-        if (value < 0.f)
+        if (value < 0.0)
         {
-            value = 0.f;
+            value = 0.0;
 		}
 
         outFile << value << std::endl;
@@ -938,11 +946,11 @@ void createSBT(PathTracerState& state, const sutil::Scene& scene)
     std::vector<HitGroupRecord> agent_hitgroup_records;
 
 	// Debug: Store triangle offsets for each mesh part
-	std::vector<unsigned int> triangle_offsets;
+	std::vector<unsigned long> triangle_offsets;
     std::vector<std::string> mesh_names;    
     
-    // ADD THESE TWO VECTORS:
-    std::vector<unsigned int> triangle_counts;
+    // Mesh triangle count
+    std::vector<unsigned long> triangle_counts;
 
     unsigned int global_triangle_offset = 0u;
 
@@ -1146,9 +1154,8 @@ std::string sanitizeFilename(const std::string& filename)
 
 void writeWeightsPerMeshUsingOffsets(
     const PathTracerState& state,
-    const std::vector<unsigned int>& offsets,
-    const std::vector<unsigned int>& counts,
-	const unsigned long total_ray_launches,
+    const std::vector<unsigned long>& offsets,
+    const std::vector<unsigned long>& mesh_triangle_counts,
     const std::vector<std::string>& names,
     const std::string& model_name,
     const std::string& base_output_path = ""
@@ -1172,12 +1179,13 @@ void writeWeightsPerMeshUsingOffsets(
 
         // Extract weights and hit counts for this specific mesh part using offsets
         const double* mesh_weights = &state.params.h_triangle_weights[offsets[i]];
-        const unsigned int* mesh_hit_counts = &state.params.h_triangle_hits_count[offsets[i]];
+        const unsigned long* mesh_total_hit_counts = &state.params.h_triangle_total_hits_count[offsets[i]];
+        const unsigned long* mesh_not_occluded_hit_counts = &state.params.h_triangle_not_occluded_hits_count[offsets[i]];
 
         // Use your existing writeWeightsToFile function!
-        writeWeightsToFile(mesh_weights, mesh_hit_counts, counts[i], total_ray_launches, filename);
+        writeWeightsToFile(mesh_weights, mesh_total_hit_counts, mesh_not_occluded_hit_counts, mesh_triangle_counts[i], filename);
 
-        std::cout << "-- Exported " << counts[i] << " triangle weights for: "
+        std::cout << "-- Exported " << mesh_triangle_counts[i] << " triangle weights for: "
             << names[i] << " (offset: " << offsets[i] << ")" << std::endl;
     }
 
@@ -1371,9 +1379,18 @@ int main(int argc, char* argv[])
 
                         // Memcpy for hit counts
                         CUDA_CHECK(cudaMemcpyAsync(
-                            reinterpret_cast<void*>(state.params.h_triangle_hits_count),
-                            reinterpret_cast<void*>(state.params.d_triangle_hits_count),
-                            state.params.scene_triangle_count * sizeof(unsigned int),
+                            reinterpret_cast<void*>(state.params.h_triangle_total_hits_count),
+                            reinterpret_cast<void*>(state.params.d_triangle_total_hits_count),
+                            state.params.scene_triangle_count * sizeof(unsigned long),
+                            cudaMemcpyDeviceToHost
+                        ));
+                        CUDA_SYNC_CHECK();
+
+                        // Memcpy for hit counts
+                        CUDA_CHECK(cudaMemcpyAsync(
+                            reinterpret_cast<void*>(state.params.h_triangle_not_occluded_hits_count),
+                            reinterpret_cast<void*>(state.params.d_triangle_not_occluded_hits_count),
+                            state.params.scene_triangle_count * sizeof(unsigned long),
                             cudaMemcpyDeviceToHost
                         ));
                         CUDA_SYNC_CHECK();
@@ -1383,7 +1400,6 @@ int main(int argc, char* argv[])
                             state,
                             triangle_offsets,
                             triangle_counts,
-                            state.params.total_rays_launched,
                             mesh_names,
                             model_name
                         );
@@ -1391,7 +1407,7 @@ int main(int argc, char* argv[])
                         // Create buffer with triangle weights and hits
                         // and write to .txt file
                         std::string output_filename = std::string(getenv("USERPROFILE")) + "\\Desktop\\" + model_name + "_weights.txt";
-                        writeWeightsToFile(state.params.h_triangle_weights, state.params.h_triangle_hits_count, state.params.scene_triangle_count, state.params.total_rays_launched, output_filename);
+                        writeWeightsToFile(state.params.h_triangle_weights, state.params.h_triangle_total_hits_count, state.params.h_triangle_not_occluded_hits_count, state.params.scene_triangle_count, output_filename);
 
                         std::cout << "Successfully written out to '" << output_filename << "'." << std::endl << "Exiting...\n" << std::endl;
 

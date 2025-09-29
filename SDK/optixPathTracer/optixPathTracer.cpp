@@ -496,7 +496,7 @@ void initAgent(PathTracerState& state)
     state.params.agent.fov = 90.0f;
     state.params.agent_mode = true;
     state.params.agent.find_new_direction = true;
-	state.params.agent.obstacle_threshold_distance = 5.f; // Minimum distance to an obstacle before changing direction
+	state.params.agent.obstacle_threshold_distance = 4.f; // Minimum distance to an obstacle before changing direction
     state.params.agent.previous_maximum_distance_index = 0;
 }
 
@@ -601,7 +601,7 @@ void writeWeightsToFile(const double* triangle_weights, const unsigned long* tri
 
         if (triangle_total_hits_count[i] > 0 && triangle_not_occluded_hits_count[i] > 0)
         {
-            printf("Triangle %zu: Weight = %f, Total Hits Count = %u, Total Not-Occluded Hits Count = %u\n", i, triangle_weights[i], triangle_total_hits_count[i], triangle_not_occluded_hits_count[i]);
+            //printf("Triangle %zu: Weight = %f, Total Hits Count = %u, Total Not-Occluded Hits Count = %u\n", i, triangle_weights[i], triangle_total_hits_count[i], triangle_not_occluded_hits_count[i]);
             value = triangle_weights[i] * (static_cast<double>(triangle_not_occluded_hits_count[i]) / static_cast<double>(triangle_total_hits_count[i]));
         }
 
@@ -1210,8 +1210,8 @@ int main(int argc, char* argv[])
     //
     // Parse command line options
     //
-    std::string model_filepath = "Sponza/";
-	std::string model_name = "sponza";
+    std::string model_filepath = "Sponza/sponza_cleaned/";
+	std::string model_name = "sponza_cleaned";
     std::string model_extension = ".gltf";
     std::string filename = model_filepath + model_name + model_extension;
 

@@ -437,7 +437,7 @@ extern "C" __global__ void __miss__radiance()
 __forceinline__ __device__ double computeWeight(float distance)
 {
     const double falloffStart = 1.0;   // Distance where falloff begins
-    const double falloffEnd = 50.0;    // Distance where weight becomes ~0
+    const double falloffEnd = 20.0;    // Distance where weight becomes ~0
 
     if (distance <= falloffStart) {
         return 1.0; // Full weight for close objects
@@ -452,8 +452,6 @@ __forceinline__ __device__ double computeWeight(float distance)
     double weight = 0.5 * (1.0 + cos(t * M_PI));
 
     return fmaxf(weight, 0.001); // Minimum threshold
-
-
 }
 
 template<typename T>
@@ -681,13 +679,18 @@ extern "C" __global__ void __closesthit__radiance()
 
     if (params.accumulate_weights && params.agent.step_count < params.agent.max_steps)
     {
+        float3 ray_origin = hit_point + 0.001f * normalize(params.agent.eye_position - hit_point);
+        float3 ray_direction = normalize(params.agent.eye_position - hit_point);
+        float ray_distance = length(params.agent.eye_position - hit_point);
+
         const bool trace_occluded =
             traceOcclusion(
                 params.handle,
-                hit_point,
-                params.agent.eye_position,
+                ray_origin,
+                ray_direction,
                 0.01f,           // tmin
-                length(params.agent.eye_position - hit_point) - 0.01f);  // tmax
+                ray_distance - 0.01f  // tmax
+                );
 
 		// Check if the ray is occluded from the agent's eye position
 		if (!trace_occluded)

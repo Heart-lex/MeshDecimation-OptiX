@@ -177,12 +177,12 @@ struct Params
     float3       V;
     float3       W;
     
-	double* d_triangle_weights; // (Device) one float weight per triangle in the scene   
+	float* d_triangle_weights; // (Device) one float weight per triangle in the scene   
 	
     unsigned long* d_triangle_not_occluded_hits_count; // (Device) Hits that were not occluded - one int count per triangle in the scene
     unsigned long* d_triangle_total_hits_count; // (Device) Total triangle hits (occluded or not) - one int count per triangle in the scene
 
-    double* h_triangle_weights; // (Host) one float weight per triangle in the scene   
+    float* h_triangle_weights; // (Host) one float weight per triangle in the scene   
     
     unsigned long* h_triangle_not_occluded_hits_count; // (Host) Hits that were not occluded - one int count per triangle in the scene
     unsigned long* h_triangle_total_hits_count; // (Host) Hits that were not occluded - one int count per triangle in the scene

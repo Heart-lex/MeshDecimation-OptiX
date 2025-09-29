@@ -432,27 +432,21 @@ extern "C" __global__ void __miss__radiance()
     storeMissRadiancePRD(prd);
 }
 
-// Compute a weight based on distance for a given hit.
-// Closer hits have higher weight, farther hits have lower weight.
 __forceinline__ __device__ double computeWeight(float distance)
 {
-    const double falloffStart = 1.0;   // Distance where falloff begins
-    const double falloffEnd = 20.0;    // Distance where weight becomes ~0
+    const double minDistance = 0.1;   // Objects closer than this get max weight
+    const double maxDistance = 50.0;  // Objects farther than this get min weight
 
-    if (distance <= falloffStart) {
-        return 1.0; // Full weight for close objects
-    }
+    // Clamp distance to meaningful range
+    double clampedDistance = fmaxf(fminf(distance, maxDistance), minDistance);
 
-    if (distance >= falloffEnd) {
-        return 0.001; // Minimum weight for far objects (not zero to avoid issues)
-    }
+    // Linear falloff from 1.0 to 0.0
+    double normalizedDistance = (clampedDistance - minDistance) / (maxDistance - minDistance);
+    double weight = 1.0 - normalizedDistance;
 
-    // Smooth falloff using cosine interpolation
-    double t = (distance - falloffStart) / (falloffEnd - falloffStart);
-    double weight = 0.5 * (1.0 + cos(t * M_PI));
-
-    return fmaxf(weight, 0.001); // Minimum threshold
+    return fmaxf(weight, 0.0); // Ensure non-negative
 }
+
 
 template<typename T>
 __forceinline__ __device__ T sampleTexture(const MaterialData::Texture& texture, const float2 uv)
@@ -679,7 +673,7 @@ extern "C" __global__ void __closesthit__radiance()
 
     if (params.accumulate_weights && params.agent.step_count < params.agent.max_steps)
     {
-        float3 ray_origin = hit_point + 0.001f * normalize(params.agent.eye_position - hit_point);
+        float3 ray_origin = /*hit_point + 0.001f **/ normalize(params.agent.eye_position - hit_point);
         float3 ray_direction = normalize(params.agent.eye_position - hit_point);
         float ray_distance = length(params.agent.eye_position - hit_point);
 
@@ -696,10 +690,11 @@ extern "C" __global__ void __closesthit__radiance()
 		if (!trace_occluded)
         // Accumulate weight for the triangle that was hit
         {
-            params.d_triangle_weights[global_triangle_idx] += foveated_weight * computeWeight(length(params.agent.eye_position - hit_point));
+            params.d_triangle_weights[global_triangle_idx] += /*foveated_weight **/0 * computeWeight(length(params.agent.eye_position - hit_point));
 
             // Increment hit count for the triangle
             params.d_triangle_not_occluded_hits_count[global_triangle_idx] += 1ul;
+
         }
 
         // Still add the hit to the total hit count even if occluded

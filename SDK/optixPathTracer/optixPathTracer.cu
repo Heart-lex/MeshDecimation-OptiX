@@ -432,19 +432,47 @@ extern "C" __global__ void __miss__radiance()
     storeMissRadiancePRD(prd);
 }
 
-__forceinline__ __device__ double computeWeight(float distance)
+// Compute a weight based on distance for a given hit.
+// Closer hits have higher weight, farther hits have lower weight.
+__forceinline__ __device__ float computeWeight(float distance)
 {
-    const double minDistance = 0.1;   // Objects closer than this get max weight
-    const double maxDistance = 50.0;  // Objects farther than this get min weight
+    /* SIGMOID */
+    //const float max_weight = 1.5f;       // Low maximum per hit
+    //const float min_weight = 0.05f;      // Reasonable minimum
+    //const float midpoint = 15.0f;        // Transition around 15 units
+    //const float steepness = 0.25f;       // Moderate transition speed
 
-    // Clamp distance to meaningful range
-    double clampedDistance = fmaxf(fminf(distance, maxDistance), minDistance);
+    //// Handle edge cases
+    //if (distance <= 0.01f) return max_weight;
+    //if (distance >= 100.0f) return min_weight;
 
-    // Linear falloff from 1.0 to 0.0
-    double normalizedDistance = (clampedDistance - minDistance) / (maxDistance - minDistance);
-    double weight = 1.0 - normalizedDistance;
+    //// Sigmoid calculation
+    //float sigmoid = 1.0f / (1.0f + expf(steepness * (distance - midpoint)));
+    //return min_weight + (max_weight - min_weight) * sigmoid;
 
-    return fmaxf(weight, 0.0); // Ensure non-negative
+	/* LOGARITHMIC */
+    // Minimum distance to avoid division by zero or extremely large weights
+    const float minDistance = 1e-3f;
+    float safeDistance = fmaxf(distance, minDistance);
+    // Compute weight based on distance (inverse square law)
+    // This means closer objects contribute more, and weight decreases rapidly with distance
+    float weight = 1.0f / log10(1 + safeDistance * safeDistance);
+
+    // Clamp the weight to 1 to prevent extreme values for very small distances
+    return fminf(weight, 1.0f);
+
+	/* LINEAR */
+    //const double minDistance = 0.1;   // Objects closer than this get max weight
+    //const double maxDistance = 50.0;  // Objects farther than this get min weight
+
+    //// Clamp distance to meaningful range
+    //double clampedDistance = fmaxf(fminf(distance, maxDistance), minDistance);
+
+    //// Linear falloff from 1.0 to 0.0
+    //double normalizedDistance = (clampedDistance - minDistance) / (maxDistance - minDistance);
+    //double weight = 1.0 - normalizedDistance;
+
+    //return fmaxf(weight, 0.0); // Ensure non-negative
 }
 
 
@@ -523,43 +551,45 @@ __forceinline__ __device__ float3 getBaseColor(const GeometryData::TriangleMesh&
     return baseColor;
 }
 
-__forceinline__ __device__ double calculateFoveatedWeight(
+__forceinline__ __device__ float calculateFoveatedWeight(
     float3 agent_direction,
     float3 ray_direction)
 {
     // Human vision parameters (in radians)
-    const double foveal_angle = 0.0349;      // ~2 degrees (sharp vision)
-    const double parafoveal_angle = 0.0873;  // ~5 degrees (good vision)  
-    const double peripheral_angle = 0.7854;  // ~45 degrees (motion detection)
+    // Reference table:
+    // https://www1.grc.nasa.gov/beginners-guide-to-aeronautics/sine-cosine-tangent/
+    const float foveal_angle = 0.0872;      // ~5 degrees (sharp vision)
+    const float parafoveal_angle = 0.3420;  // ~20 degrees (good vision)  
+    const float peripheral_angle = 0.7071;  // ~45 degrees (motion detection)
 
-    double cosine_similarity = dot(normalize(agent_direction), normalize(ray_direction));
+    float cosine_similarity = dot(normalize(agent_direction), normalize(ray_direction));
 
     // Convert angles to cosine thresholds
-    double foveal_cos = cosf(foveal_angle);
-    double parafoveal_cos = cosf(parafoveal_angle);
-    double peripheral_cos = cosf(peripheral_angle);
+    float foveal_cos = cosf(foveal_angle);
+    float parafoveal_cos = cosf(parafoveal_angle);
+    float peripheral_cos = cosf(peripheral_angle);
 
     if (cosine_similarity >= foveal_cos)
     {
         // Foveal region - highest weight (1.0)
-        return 1.0;
+        return 1.0f;
     }
     else if (cosine_similarity >= parafoveal_cos)
     {
         // Parafoveal region - medium weight (0.5 to 1.0)
-        double t = (cosine_similarity - parafoveal_cos) / (foveal_cos - parafoveal_cos);
-        return 0.5 + 0.5 * t;
+        float t = (cosine_similarity - parafoveal_cos) / (foveal_cos - parafoveal_cos);
+        return 0.5f + 0.5f * t;
     }
     else if (cosine_similarity >= peripheral_cos)
     {
         // Peripheral region - low weight (0.1 to 0.5)
-        double t = (cosine_similarity - peripheral_cos) / (parafoveal_cos - peripheral_cos);
-        return 0.1 + 0.4 * t;
+        float t = (cosine_similarity - peripheral_cos) / (parafoveal_cos - peripheral_cos);
+        return 0.1f + 0.4f * t;
     }
     else
     {
         // Outside field of view
-        return 0.0;
+        return 0.0f;
     }
 }
 
@@ -578,7 +608,6 @@ extern "C" __global__ void __closesthit__radiance()
     const int    prim_idx = optixGetPrimitiveIndex();
     const int    global_triangle_idx = prim_idx + triangle_offset;  // Calculate global index
     const float3 ray_dir = optixGetWorldRayDirection();
-    const unsigned int    vert_idx_offset = prim_idx * 3;
 
     uint3 tri;
     if (mesh.indices)
@@ -605,7 +634,7 @@ extern "C" __global__ void __closesthit__radiance()
     // Cosine similarity between the ray direction and the camera direction
     // This can be used to weight contributions based on alignment with the camera view.
     // Agent has the same direction as the camera.
-	const double foveated_weight = calculateFoveatedWeight(params.agent.direction, ray_dir);
+	const float foveated_weight = calculateFoveatedWeight(params.agent.direction, ray_dir);
 
     const float3 N = faceforward(N_0, -ray_dir, N_0);
     const float3 P = optixGetWorldRayOrigin() + optixGetRayTmax() * ray_dir;
@@ -673,7 +702,7 @@ extern "C" __global__ void __closesthit__radiance()
 
     if (params.accumulate_weights && params.agent.step_count < params.agent.max_steps)
     {
-        float3 ray_origin = /*hit_point + 0.001f **/ normalize(params.agent.eye_position - hit_point);
+        float3 ray_origin = hit_point + 0.001f * normalize(params.agent.eye_position - hit_point);
         float3 ray_direction = normalize(params.agent.eye_position - hit_point);
         float ray_distance = length(params.agent.eye_position - hit_point);
 
@@ -690,11 +719,11 @@ extern "C" __global__ void __closesthit__radiance()
 		if (!trace_occluded)
         // Accumulate weight for the triangle that was hit
         {
-            params.d_triangle_weights[global_triangle_idx] += /*foveated_weight **/0 * computeWeight(length(params.agent.eye_position - hit_point));
+			// Compute weight based on distance from the agent's eye position, modulated by foveated weight and logarithmically scaled
+            params.d_triangle_weights[global_triangle_idx] += log(1 + foveated_weight * computeWeight(length(params.agent.eye_position - hit_point)));
 
             // Increment hit count for the triangle
             params.d_triangle_not_occluded_hits_count[global_triangle_idx] += 1ul;
-
         }
 
         // Still add the hit to the total hit count even if occluded

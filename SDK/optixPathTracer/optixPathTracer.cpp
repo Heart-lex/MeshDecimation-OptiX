@@ -91,7 +91,7 @@ bool weight_accumulation = false;
 bool agent_mode = false;
 bool agent_step_move = false;
 bool agent_looping_move = false;
-double max_weight = 0.0;
+float max_weight = 0.0f;
 
 std::vector<std::string> mesh_names;
 std::vector<unsigned long> triangle_offsets;
@@ -292,22 +292,36 @@ void initLaunchParams(PathTracerState& state, const sutil::Scene& scene)
     // Allocate space for one float weight per triangle in the scene
     CUDA_CHECK(cudaMalloc(
         reinterpret_cast<void**>(&state.params.d_triangle_weights),
-        state.params.scene_triangle_count * sizeof(double)
+        state.params.scene_triangle_count * sizeof(float)
     ));
 
-    // Allocate space for one integer count per triangle in the scene
+	// Initialize all triangle weights to zero
+    CUDA_CHECK(cudaMemset(
+        reinterpret_cast<void*>(state.params.d_triangle_weights),
+        0.f,
+        state.params.scene_triangle_count * sizeof(float)
+    ));
+
+    // Allocate space for one unsigned long count per triangle in the scene
     CUDA_CHECK(cudaMalloc(
         reinterpret_cast<void**>(&state.params.d_triangle_not_occluded_hits_count),
         state.params.scene_triangle_count * sizeof(unsigned long)
     ));
 
-    // Allocate space for one integer count per triangle in the scene
+	// Initialize all triangle not occluded hits counts to zero
+    CUDA_CHECK(cudaMemset(
+        reinterpret_cast<void*>(state.params.d_triangle_not_occluded_hits_count),
+        0ul,
+        state.params.scene_triangle_count * sizeof(unsigned long)
+	));
+
+    // Allocate space for one unsigned long count per triangle in the scene
     CUDA_CHECK(cudaMalloc(
         reinterpret_cast<void**>(&state.params.d_triangle_total_hits_count),
         state.params.scene_triangle_count * sizeof(unsigned long)
     ));
 
-    CUDA_CHECK(cudaMallocHost(&state.params.h_triangle_weights, state.params.scene_triangle_count * sizeof(double)));
+    CUDA_CHECK(cudaMallocHost(&state.params.h_triangle_weights, state.params.scene_triangle_count * sizeof(float)));
 
     CUDA_CHECK(cudaMallocHost(&state.params.h_triangle_not_occluded_hits_count, state.params.scene_triangle_count * sizeof(unsigned long)));
 
@@ -339,6 +353,7 @@ void initLaunchParams(PathTracerState& state, const sutil::Scene& scene)
     state.params.samples_per_launch = samples_per_launch;
     state.params.subframe_index = 0u;
 
+	// Light params (UNUSED BUT REQUIRED BY CURRENT CUDA IMPLEMENTATION)
     state.params.light.emission = make_float3(15.0f, 15.0f, 5.0f);
     state.params.light.corner = make_float3(343.0f, 548.5f, 227.0f);
     state.params.light.v1 = make_float3(0.0f, 0.0f, 105.0f);
@@ -569,16 +584,16 @@ void agentMoveStep(Agent& agent)
     agent.position += agent.direction * (agent.h_distances[agent.maximum_distance_index] * agent.march_distance);
 }
 
-void findMaxValue(const double* triangle_weights, size_t count)
-{
-    if (count == 0) return;
 
-    for (size_t i = 0; i < count; ++i)
+void findMaxValue(const float* triangle_weights, size_t scene_triangle_count)
+{
+    if (scene_triangle_count == 0) return;
+
+    for (size_t i = 0; i < scene_triangle_count; ++i)
     {
         if (triangle_weights[i] > max_weight)
         {
             max_weight = triangle_weights[i];
-
         }
     }
 }
@@ -598,7 +613,133 @@ void updateAgentState(PathTracerState& state)
     agent_step_move = false;
 }
 
-void writeWeightsToFile(PathTracerState state, double* triangle_weights, const unsigned long* triangle_total_hits_count, const unsigned long* triangle_not_occluded_hits_count, const unsigned long scene_triangle_count, const std::string& filepath)
+
+void normalizeWeights(float* weights, int num_triangles, float target_min = 0.1f, float target_max = 10.0f)
+{
+    // Find current min and max
+    float min_weight = FLT_MAX;
+    float max_weight = -FLT_MAX;
+
+    for (int i = 0; i < num_triangles; i++) {
+        if (weights[i] > 0.0f) {
+            min_weight = fminf(min_weight, weights[i]);
+            max_weight = fmaxf(max_weight, weights[i]);
+        }
+    }
+
+    if (max_weight <= min_weight) return;
+
+    float range = max_weight - min_weight;
+    float target_range = target_max - target_min;
+
+    // Normalize: ((value - min) / range) * target_range + target_min
+    for (int i = 0; i < num_triangles; i++) {
+        if (weights[i] > 0.0f) {
+            float normalized = (weights[i] - min_weight) / range;
+            weights[i] = target_min + normalized * target_range;
+        }
+    }
+}
+
+
+// Helper function to find median
+float findMedian(float* values, size_t count)
+{
+    // Simple selection for median (you might want to use std::nth_element)
+    std::vector<float> sorted_values(values, values + count);
+    std::sort(sorted_values.begin(), sorted_values.end());
+
+    if (count % 2 == 0) {
+        return (sorted_values[count / 2 - 1] + sorted_values[count / 2]) * 0.5f;
+    }
+    else {
+        return sorted_values[count / 2];
+    }
+}
+
+
+// Robust standardization using median and MAD
+void robustStandardizeWeights(float* weights, int num_triangles)
+{
+    // Collect valid weights
+    std::vector<float> valid_weights;
+    for (int i = 0; i < num_triangles; i++) {
+        if (weights[i] > 0.0f) {
+            valid_weights.push_back(weights[i]);
+        }
+    }
+
+    if (valid_weights.size() <= 1) return;
+
+    // Calculate median
+    float median = findMedian(valid_weights.data(), valid_weights.size());
+
+    // Calculate MAD (Median Absolute Deviation)
+    std::vector<float> deviations;
+    for (float w : valid_weights) {
+        deviations.push_back(fabsf(w - median));
+    }
+    float mad = findMedian(deviations.data(), deviations.size());
+
+    if (mad < 1e-6f) return;
+
+    // Robust standardization: (value - median) / (1.4826 * MAD)
+    float scale_factor = 1.4826f * mad;  // Makes it comparable to std dev
+
+    for (int i = 0; i < num_triangles; i++) {
+        if (weights[i] > 0.0f) {
+            weights[i] = (weights[i] - median) / scale_factor;
+        }
+    }
+}
+
+
+// Main function to standardize triangle weights
+void standardizeTriangleWeights(float* weights, int num_triangles)
+{
+    // Cap extreme outliers first
+    const float outlier_threshold = 1000.0f;  // Anything above this is capped
+
+    for (int i = 0; i < num_triangles; i++) {
+        if (weights[i] > outlier_threshold) {
+            weights[i] = outlier_threshold + log1pf(weights[i] - outlier_threshold) * 100.0f;
+        }
+    }
+
+    // Apply robust standardization
+    robustStandardizeWeights(weights, num_triangles);
+
+    // Final normalization to desired range
+    normalizeWeights(weights, num_triangles, 0.1f, 10.0f);
+}
+
+
+//  Ensure all weights are positive after standardization
+void standardizeWeightsPositive(float* weights, int num_triangles) {
+    // Step 1: Apply your current standardization
+    standardizeTriangleWeights(weights, num_triangles);
+
+    // Step 2: Find the minimum value
+    float min_weight = FLT_MAX;
+    for (int i = 0; i < num_triangles; i++) {
+        if (weights[i] != 0.0f) {  // Skip zero weights
+            min_weight = fminf(min_weight, weights[i]);
+        }
+    }
+
+    // Step 3: Shift all values to make minimum = 0.1
+    const float target_min = 0.1f;
+    float shift = target_min - min_weight;
+
+    for (int i = 0; i < num_triangles; i++) {
+        if (weights[i] != 0.0f) {
+            weights[i] += shift;
+        }
+    }
+}
+
+
+void writeWeightsToFile(PathTracerState state, float* triangle_weights, const unsigned long* triangle_total_hits_count, const unsigned long* triangle_not_occluded_hits_count, const unsigned long scene_triangle_count, const std::string& filepath)
 {
     std::ofstream outFile(filepath);
 
@@ -608,40 +749,16 @@ void writeWeightsToFile(PathTracerState state, double* triangle_weights, const u
         return;
     }
 
-    outFile << std::fixed << std::setprecision(10);
+    outFile << std::fixed << std::setprecision(16);
 
     for (size_t i = 0; i < scene_triangle_count; i++)
     {
-        double value = 0.0;
+        float value = 0.0;
 
-        if (triangle_total_hits_count[i] > 0 && triangle_not_occluded_hits_count[i] > 0)
-        {
-            //printf("Triangle %zu: Weight = %f, Total Hits Count = %u, Total Not-Occluded Hits Count = %u\n", i, triangle_weights[i], triangle_total_hits_count[i], triangle_not_occluded_hits_count[i]);
-            triangle_weights[i] = triangle_weights[i] * (static_cast<double>(triangle_not_occluded_hits_count[i]) / static_cast<double>(triangle_total_hits_count[i]));
-        }
+        printf("Triangle %zu: Weight = %f, Max Weight: %f\n", i, triangle_weights[i], max_weight);
 
-    }
-
-    findMaxValue(triangle_weights, state.params.scene_triangle_count);
-
-
-    for (size_t i = 0; i < scene_triangle_count; i++)
-    {
-        double value = 0.0;
-
-        printf("Triangle %zu: Weight = %f, Max Weight: %d\n", i, triangle_weights[i], max_weight);
+		// Normalize weight by max weight
         value = triangle_weights[i] / max_weight;
-
-
-        //if (value > 1.0)
-        //{
-        //    value = 1.0;
-        //}
-
-        //if (value < 0.0)
-        //{
-        //    value = 0.0;
-        //}
 
         outFile << value << std::endl;
 
@@ -650,7 +767,27 @@ void writeWeightsToFile(PathTracerState state, double* triangle_weights, const u
     outFile.close();
 }
 
+// Debug function to print weight distribution statistics
+void debugWeightDistribution(float* weights, int num_triangles) {
+    float min_w = FLT_MAX, max_w = -FLT_MAX, sum_w = 0.0f;
+    int valid_count = 0;
 
+    for (int i = 0; i < num_triangles; i++) {
+        if (weights[i] > 0.0f) {
+            min_w = fminf(min_w, weights[i]);
+            max_w = fmaxf(max_w, weights[i]);
+            sum_w += weights[i];
+            valid_count++;
+        }
+    }
+
+    if (valid_count > 0) {
+        float avg_w = sum_w / valid_count;
+        float ratio = (min_w > 0.0f) ? max_w / min_w : 0.0f;
+        printf("Standardized weights: Min=%.3f, Max=%.3f, Avg=%.3f, Ratio=%.1fx\n",
+            min_w, max_w, avg_w, ratio);
+    }
+}
 
 
 void createContext(PathTracerState& state)
@@ -1209,12 +1346,11 @@ void writeWeightsPerMeshUsingOffsets(
         std::string filename = output_dir + sanitized_name + "_weights.txt";
 
         // Extract weights and hit counts for this specific mesh part using offsets
-        double* mesh_weights = &state.params.h_triangle_weights[offsets[i]];
+        float* mesh_weights = &state.params.h_triangle_weights[offsets[i]];
         const unsigned long* mesh_total_hit_counts = &state.params.h_triangle_total_hits_count[offsets[i]];
         const unsigned long* mesh_not_occluded_hit_counts = &state.params.h_triangle_not_occluded_hits_count[offsets[i]];
 
-
-        // Use your existing writeWeightsToFile function!
+		// Write to file
         writeWeightsToFile(state, mesh_weights, mesh_total_hit_counts, mesh_not_occluded_hit_counts, mesh_triangle_counts[i], filename);
 
         std::cout << "-- Exported " << mesh_triangle_counts[i] << " triangle weights for: "
@@ -1404,7 +1540,7 @@ int main(int argc, char* argv[])
                         CUDA_CHECK(cudaMemcpyAsync(
                             reinterpret_cast<void*>(state.params.h_triangle_weights),
                             reinterpret_cast<void*>(state.params.d_triangle_weights),
-                            state.params.scene_triangle_count * sizeof(double),
+                            state.params.scene_triangle_count * sizeof(float),
                             cudaMemcpyDeviceToHost
                         ));
                         CUDA_SYNC_CHECK();
@@ -1427,16 +1563,25 @@ int main(int argc, char* argv[])
                         ));
                         CUDA_SYNC_CHECK();
 
-                        //findMaxValue(state.params.h_triangle_weights, state.params.scene_triangle_count);
+                        printf("Before standardization:\n");
+                        debugWeightDistribution(state.params.h_triangle_weights, state.params.scene_triangle_count);
 
-                        // Export weights per mesh using your existing offset system!
-                        writeWeightsPerMeshUsingOffsets(
-                            state,
-                            triangle_offsets,
-                            triangle_counts,
-                            mesh_names,
-                            model_name
-                        );
+                        // Standardize the weights
+                        standardizeWeightsPositive(state.params.h_triangle_weights, state.params.scene_triangle_count);
+
+                        printf("After standardization:\n");
+                        debugWeightDistribution(state.params.h_triangle_weights, state.params.scene_triangle_count);
+
+                        findMaxValue(state.params.h_triangle_weights, state.params.scene_triangle_count);
+
+                        // Export weights per mesh
+                        //writeWeightsPerMeshUsingOffsets(
+                        //    state,
+                        //    triangle_offsets,
+                        //    triangle_counts,
+                        //    mesh_names,
+                        //    model_name
+                        //);
 
                         // Create buffer with triangle weights and hits
                         // and write to .txt file

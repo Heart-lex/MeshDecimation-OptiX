@@ -72,6 +72,8 @@
 #include <tinygltf/tiny_gltf.h>
 #include <sutil/Scene.h>
 #include <regex>
+#include <filesystem>
+
 
 bool resize_dirty = false;
 bool minimized = false;
@@ -1319,6 +1321,44 @@ std::string sanitizeFilename(const std::string& filename)
     return sanitized;
 }
 
+// Helper function to create directories recursively (C++14 compatible)
+bool createDirectories(const std::string& path) {
+    std::string current_path;
+
+    for (size_t i = 0; i < path.length(); ++i) {
+        if (path[i] == '\\' || path[i] == '/' || i == path.length() - 1) {
+            if (i == path.length() - 1) {
+                current_path = path;
+            }
+            else {
+                current_path = path.substr(0, i);
+            }
+
+            if (!current_path.empty() && current_path.back() != ':') {
+                DWORD attrs = GetFileAttributesA(current_path.c_str());
+                if (attrs == INVALID_FILE_ATTRIBUTES) {
+                    if (!CreateDirectoryA(current_path.c_str(), NULL)) {
+                        DWORD error = GetLastError();
+                        if (error != ERROR_ALREADY_EXISTS) {
+                            return false;
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    return true;
+}
+
+// Helper function to check if directory exists
+bool directoryExists(const std::string& path) {
+    DWORD attrs = GetFileAttributesA(path.c_str());
+    return (attrs != INVALID_FILE_ATTRIBUTES &&
+        (attrs & FILE_ATTRIBUTE_DIRECTORY));
+}
+
+
 
 void writeWeightsPerMeshUsingOffsets(
     const PathTracerState& state,
@@ -1328,39 +1368,75 @@ void writeWeightsPerMeshUsingOffsets(
     const std::string& model_name,
     const std::string& base_output_path = ""
 ) {
-    // Determine output path
-    std::string output_path = base_output_path.empty() ?
-        std::string(getenv("USERPROFILE")) + "\\Desktop" :
-        base_output_path;
-
-    // Create output directory
-    std::string output_dir = output_path + "\\" + model_name + "_weights\\";
-    std::string command = "mkdir \"" + output_dir + "\" 2>nul";
-    system(command.c_str());
-
-    std::cout << "Exporting mesh weights to: " << output_dir << std::endl;
-
-    // Export weights for each mesh part using offsets
-    for (size_t i = 0; i < offsets.size(); ++i) {
-        std::string sanitized_name = sanitizeFilename(names[i]);
-        std::string filename = output_dir + sanitized_name + "_weights.txt";
-
-        // Extract weights and hit counts for this specific mesh part using offsets
-        float* mesh_weights = &state.params.h_triangle_weights[offsets[i]];
-        const unsigned long* mesh_total_hit_counts = &state.params.h_triangle_total_hits_count[offsets[i]];
-        const unsigned long* mesh_not_occluded_hit_counts = &state.params.h_triangle_not_occluded_hits_count[offsets[i]];
-
-		// Write to file
-        writeWeightsToFile(state, mesh_weights, mesh_total_hit_counts, mesh_not_occluded_hit_counts, mesh_triangle_counts[i], filename);
-
-        std::cout << "-- Exported " << mesh_triangle_counts[i] << " triangle weights for: "
-            << names[i] << " (offset: " << offsets[i] << ")" << std::endl;
+    // Determine base path
+    std::string base_path;
+    if (base_output_path.empty()) {
+        const char* userprofile = getenv("USERPROFILE");
+        if (userprofile != nullptr) {
+            base_path = std::string(userprofile) + "\\Desktop";
+        }
+        else {
+            std::cerr << "Error: Could not get USERPROFILE environment variable" << std::endl;
+            return;
+        }
+    }
+    else {
+        base_path = base_output_path;
     }
 
-    std::cout << "-- Successfully exported " << offsets.size() << " mesh weight files." << std::endl;
+    std::string model_folder = base_path + "\\" + model_name + "_weights\\";
+    std::string command = "mkdir \"" + model_folder + "\" 2>nul";
+    system(command.c_str());
+
+
+    // Read weights from input file
+    std::string filename = base_path + "\\" + model_name + "_weights.txt";
+    std::cout << "Reading mesh weights from: " << filename << std::endl;
+
+    std::ifstream inFile(filename);
+    if (!inFile.is_open()) {
+        std::cerr << "Error: Could not open file " << filename << std::endl;
+        return;
+    }
+
+    // Load all weights into memory (as doubles!)
+    std::vector<double> all_weights;
+    double weight;
+    while (inFile >> weight) {
+        all_weights.push_back(weight);
+    }
+    inFile.close();
+
+    if (all_weights.size() < state.params.scene_triangle_count) {
+        std::cerr << "Warning: File contains " << all_weights.size()
+            << " weights but scene has "
+            << state.params.scene_triangle_count << " triangles." << std::endl;
+    }
+
+    std::cout << "-- Successfully loaded " << all_weights.size() << " weights from file." << std::endl;
+
+    // Export per mesh into the model folder
+    for (size_t i = 0; i < names.size(); ++i) {
+        unsigned long start = offsets[i];
+        unsigned long end = (i + 1 < offsets.size()) ? offsets[i + 1] : all_weights.size(); // last mesh
+
+        std::string out_filename = model_folder + "\\" + names[i] + "_weights.txt";
+        std::ofstream outFile(out_filename);
+        if (!outFile.is_open()) {
+            std::cerr << "Error: Could not write to " << out_filename << std::endl;
+            continue;
+        }
+
+        outFile << std::fixed << std::setprecision(16);
+
+        for (unsigned long j = start; j < end; ++j) {
+            outFile << all_weights[j] << "\n";
+        }
+
+        outFile.close();
+        std::cout << "Exported " << (end - start) << " weights to " << out_filename << std::endl;
+    }
 }
-
-
 
 //------------------------------------------------------------------------------
 //
@@ -1587,7 +1663,7 @@ int main(int argc, char* argv[])
                         // and write to .txt file
                         std::string output_filename = std::string(getenv("USERPROFILE")) + "\\Desktop\\" + model_name + "_weights.txt";
                         writeWeightsToFile(state, state.params.h_triangle_weights, state.params.h_triangle_total_hits_count, state.params.h_triangle_not_occluded_hits_count, state.params.scene_triangle_count, output_filename);
-
+                        writeWeightsPerMeshUsingOffsets(state, triangle_offsets, triangle_counts, mesh_names, model_name);
                         std::cout << "Successfully written out to '" << output_filename << "'." << std::endl << "Exiting...\n" << std::endl;
 
                         return 0;

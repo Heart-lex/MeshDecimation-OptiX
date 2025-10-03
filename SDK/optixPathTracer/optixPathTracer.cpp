@@ -31,10 +31,6 @@
 
 #include <glad/glad.h>  // Needs to be included before gl_interop
 
-#define TINYOBJLOADER_IMPLEMENTATION // define this in only *one* .cc
- // Optional. define TINYOBJLOADER_USE_MAPBOX_EARCUT gives robust triangulation. Requires C++11
- //#define TINYOBJLOADER_USE_MAPBOX_EARCUT
-#include "tiny_obj_loader.h"
 #include <cuda_gl_interop.h>
 #include <cuda_runtime.h>
 
@@ -72,8 +68,8 @@
 #include <tinygltf/tiny_gltf.h>
 #include <sutil/Scene.h>
 #include <regex>
-#include <filesystem>
 
+#define ROTATION_THETA 3.f
 
 bool resize_dirty = false;
 bool minimized = false;
@@ -94,6 +90,24 @@ bool agent_mode = false;
 bool agent_step_move = false;
 bool agent_looping_move = false;
 float max_weight = 0.0f;
+
+enum AgentMovement
+{
+    // Agent movement
+    AGENT_MOVE_FORWARD,         // W keypress
+    AGENT_MOVE_LEFT,            // A keypress
+    AGENT_MOVE_BACKWARD,        // S keypress
+    AGENT_MOVE_RIGHT,           // D keypress
+
+    // Agent rotation
+    AGENT_ROTATE_LEFT,          // Left arrow keypress
+    AGENT_ROTATE_RIGHT,         // Right arrow keypress
+
+    // Do nothing
+    AGENT_IDLE,
+};
+
+AgentMovement agent_movement;
 
 std::vector<std::string> mesh_names;
 std::vector<unsigned long> triangle_offsets;
@@ -228,7 +242,7 @@ static void keyCallback(GLFWwindow* window, int32_t key, int32_t /*scancode*/, i
 {
     if (action == GLFW_PRESS)
     {
-        if (key == GLFW_KEY_Q || key == GLFW_KEY_ESCAPE)
+        if (/*key == GLFW_KEY_Q ||*/ key == GLFW_KEY_ESCAPE)
         {
             glfwSetWindowShouldClose(window, true);
         }
@@ -248,6 +262,30 @@ static void keyCallback(GLFWwindow* window, int32_t key, int32_t /*scancode*/, i
     {
         agent_looping_move = true;
         agent_step_move = false;
+    }
+    else if (key == GLFW_KEY_W)
+    {
+        agent_movement = AGENT_MOVE_FORWARD;
+    }
+    else if (key == GLFW_KEY_A)
+    {
+        agent_movement = AGENT_MOVE_LEFT;
+    }
+    else if (key == GLFW_KEY_S)
+    {
+        agent_movement = AGENT_MOVE_BACKWARD;
+    }
+    else if (key == GLFW_KEY_D)
+    {
+        agent_movement = AGENT_MOVE_RIGHT;
+    }
+    else if (key == GLFW_KEY_LEFT)
+    {
+        agent_movement = AGENT_ROTATE_LEFT;
+    }
+    else if (key == GLFW_KEY_RIGHT)
+    {
+        agent_movement = AGENT_ROTATE_RIGHT;
     }
 }
 
@@ -500,7 +538,7 @@ void updateCameraState(const PathTracerState& state)
 void initAgent(PathTracerState& state)
 {
     // Place the agent in the center of the scene
-    state.params.agent.position = make_float3(15.0f, 0.0f, 15.0f);
+    state.params.agent.position = make_float3(0.0f, 0.0f, 0.0f);
 
     // Place the camera slightly above the agent's position
     state.params.agent.eye_position = state.params.agent.position + make_float3(0.0f, 1.5f, 0.0f);
@@ -509,12 +547,12 @@ void initAgent(PathTracerState& state)
     state.params.agent.direction = normalize(make_float3(-1.0f, 0.0f, 0.0f));
 
     state.params.agent.step_count = 0;
-    state.params.agent.max_steps = 1000;
-    state.params.agent.march_distance = 0.80f; // 80% of the way to the ray target each step
+    state.params.agent.max_steps = 3000;
+    state.params.agent.march_distance = 0.20f; // 80% of the way to the ray target each step
     state.params.agent.fov = 90.0f;
     state.params.agent_mode = true;
     state.params.agent.find_new_direction = true;
-    state.params.agent.obstacle_threshold_distance = 4.f; // Minimum distance to an obstacle before changing direction
+    state.params.agent.obstacle_threshold_distance = 5.f; // Minimum distance to an obstacle before changing direction
     state.params.agent.previous_maximum_distance_index = 0;
 }
 
@@ -603,6 +641,48 @@ void findMaxValue(const float* triangle_weights, size_t scene_triangle_count)
 
 void updateAgentState(PathTracerState& state)
 {
+    float3 new_direction;
+
+    switch (agent_movement)
+    {
+    case AGENT_IDLE:
+    default:
+        break;
+    case AGENT_MOVE_FORWARD:
+        state.params.agent.position += state.params.agent.direction * state.params.agent.march_distance;
+        state.params.agent.eye_position += state.params.agent.direction * state.params.agent.march_distance;
+        break;
+    case AGENT_MOVE_BACKWARD:
+        state.params.agent.position -= state.params.agent.direction * state.params.agent.march_distance;
+        state.params.agent.eye_position -= state.params.agent.direction * state.params.agent.march_distance;
+        break;
+    case AGENT_MOVE_LEFT:
+        state.params.agent.position += normalize(cross(camera.up(), state.params.agent.direction)) * state.params.agent.march_distance;
+        state.params.agent.eye_position += normalize(cross(camera.up(), state.params.agent.direction)) * state.params.agent.march_distance;;
+        break;
+    case AGENT_MOVE_RIGHT:
+        state.params.agent.position -= normalize(cross(camera.up(), state.params.agent.direction)) * state.params.agent.march_distance;
+        state.params.agent.eye_position -= normalize(cross(camera.up(), state.params.agent.direction)) * state.params.agent.march_distance;;
+        break;
+    case AGENT_ROTATE_RIGHT:
+        new_direction.x = state.params.agent.direction.x * cos(ROTATION_THETA * M_PIf / 180.f) - state.params.agent.direction.z * sin(ROTATION_THETA * M_PIf / 180.f);
+        new_direction.z = state.params.agent.direction.x * sin(ROTATION_THETA * M_PIf / 180.f) + state.params.agent.direction.z * cos(ROTATION_THETA * M_PIf / 180.f);
+        new_direction.y = state.params.agent.direction.y; // keep Y unchanged for horizontal rotation
+
+        state.params.agent.direction = normalize(new_direction);
+        break;
+    case AGENT_ROTATE_LEFT:
+        new_direction.x = state.params.agent.direction.x * cos(-ROTATION_THETA * M_PIf / 180.f) - state.params.agent.direction.z * sin(-ROTATION_THETA * M_PIf / 180.f);
+        new_direction.z = state.params.agent.direction.x * sin(-ROTATION_THETA * M_PIf / 180.f) + state.params.agent.direction.z * cos(-ROTATION_THETA * M_PIf / 180.f);
+        new_direction.y = state.params.agent.direction.y; // keep Y unchanged for horizontal rotation
+
+        state.params.agent.direction = normalize(new_direction);
+        break;
+    }
+
+    // Set to idle after every step
+    agent_movement = AGENT_IDLE;
+
     if (state.params.agent_mode && state.params.agent.step_count < state.params.agent.max_steps && (agent_step_move || agent_looping_move))
     {
         agentMoveStep(state.params.agent);
@@ -757,7 +837,7 @@ void writeWeightsToFile(PathTracerState state, float* triangle_weights, const un
     {
         float value = 0.0;
 
-        printf("Triangle %zu: Weight = %f, Max Weight: %f\n", i, triangle_weights[i], max_weight);
+        //printf("Triangle %zu: Weight = %f, Max Weight: %f\n", i, triangle_weights[i], max_weight);
 
 		// Normalize weight by max weight
         value = triangle_weights[i] / max_weight;
@@ -1454,8 +1534,8 @@ int main(int argc, char* argv[])
     //
     // Parse command line options
     //
-    std::string model_filepath = "/UnrealLevel/level_enclosed_v2/";
-    std::string model_name = "level_enclosed_v2";
+    std::string model_filepath = "/ApartmentFloorv2/";
+    std::string model_name = "apartment_floor";
     std::string model_extension = ".gltf";
     std::string filename = model_filepath + model_name + model_extension;
 
@@ -1650,17 +1730,7 @@ int main(int argc, char* argv[])
 
                         findMaxValue(state.params.h_triangle_weights, state.params.scene_triangle_count);
 
-                        // Export weights per mesh
-                        //writeWeightsPerMeshUsingOffsets(
-                        //    state,
-                        //    triangle_offsets,
-                        //    triangle_counts,
-                        //    mesh_names,
-                        //    model_name
-                        //);
-
-                        // Create buffer with triangle weights and hits
-                        // and write to .txt file
+                        // Create buffer with triangle weights and hits and write to .txt file
                         std::string output_filename = std::string(getenv("USERPROFILE")) + "\\Desktop\\" + model_name + "_weights.txt";
                         writeWeightsToFile(state, state.params.h_triangle_weights, state.params.h_triangle_total_hits_count, state.params.h_triangle_not_occluded_hits_count, state.params.scene_triangle_count, output_filename);
                         writeWeightsPerMeshUsingOffsets(state, triangle_offsets, triangle_counts, mesh_names, model_name);

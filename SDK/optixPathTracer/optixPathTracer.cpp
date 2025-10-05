@@ -546,14 +546,17 @@ void initAgent(PathTracerState& state)
     // Have the agent look straight ahead initially
     state.params.agent.direction = normalize(make_float3(-1.0f, 0.0f, 0.0f));
 
-    state.params.agent.step_count = 0;
+    state.params.agent.step_count = 0u;
     state.params.agent.max_steps = 3000;
-    state.params.agent.march_distance = 0.20f; // 80% of the way to the ray target each step
+    state.params.agent.march_distance = 0.80f; // 80% of the way to the ray target each step
     state.params.agent.fov = 90.0f;
     state.params.agent_mode = true;
     state.params.agent.find_new_direction = true;
-    state.params.agent.obstacle_threshold_distance = 5.f; // Minimum distance to an obstacle before changing direction
+    state.params.agent.obstacle_threshold_distance = 4.f; // Minimum distance to an obstacle before changing direction
     state.params.agent.previous_maximum_distance_index = 0;
+
+    // Allocate space to keep track of agent's positions throughout its runtime
+    CUDA_CHECK(cudaMallocHost(&state.params.agent.agent_positions, state.params.agent.max_steps * sizeof(float3)));
 }
 
 
@@ -646,7 +649,6 @@ void updateAgentState(PathTracerState& state)
     switch (agent_movement)
     {
     case AGENT_IDLE:
-    default:
         break;
     case AGENT_MOVE_FORWARD:
         state.params.agent.position += state.params.agent.direction * state.params.agent.march_distance;
@@ -686,6 +688,7 @@ void updateAgentState(PathTracerState& state)
     if (state.params.agent_mode && state.params.agent.step_count < state.params.agent.max_steps && (agent_step_move || agent_looping_move))
     {
         agentMoveStep(state.params.agent);
+        state.params.agent.agent_positions[state.params.agent.step_count] = state.params.agent.position; // Keep track of agent position each step
         state.params.agent.eye_position += state.params.agent.direction * state.params.agent.march_distance;
         state.params.agent.step_count++;
         camera_changed = true;
@@ -844,6 +847,33 @@ void writeWeightsToFile(PathTracerState state, float* triangle_weights, const un
 
         outFile << value << std::endl;
 
+    }
+
+    outFile.close();
+}
+
+
+void writeAgentPositionsToFile(float3* agent_positions, const unsigned long max_step_count, const std::string& filepath)
+{
+    std::ofstream outFile(filepath);
+
+    if (!outFile.is_open())
+    {
+        std::cerr << "Error: Could not open file " << filepath << " for writing." << std::endl;
+        return;
+    }
+
+    outFile << std::fixed << std::setprecision(5);
+
+    float3 position = make_float3(-1.f, -1.f, -1.f); // Negative so that it's obvious in case something goes wrong
+
+    for (size_t i = 0; i < max_step_count; i++)
+    {
+
+        // Normalize weight by max weight
+        position = agent_positions[i];
+
+        outFile << position.x << " " << position.y << " " << position.z << std::endl;
     }
 
     outFile.close();
@@ -1348,6 +1378,7 @@ void displayAgentDistances(const float* agent_distances)
     ++total_subframe_count;
 }
 
+
 void cleanupState(PathTracerState& state)
 {
     OPTIX_CHECK(optixPipelineDestroy(state.pipeline));
@@ -1373,6 +1404,7 @@ void cleanupState(PathTracerState& state)
     CUDA_CHECK(cudaFree(reinterpret_cast<void*>(state.params.accum_buffer)));
     CUDA_CHECK(cudaFree(reinterpret_cast<void*>(state.d_params)));
 }
+
 
 std::string sanitizeFilename(const std::string& filename)
 {
@@ -1400,6 +1432,7 @@ std::string sanitizeFilename(const std::string& filename)
 
     return sanitized;
 }
+
 
 // Helper function to create directories recursively (C++14 compatible)
 bool createDirectories(const std::string& path) {
@@ -1430,6 +1463,7 @@ bool createDirectories(const std::string& path) {
 
     return true;
 }
+
 
 // Helper function to check if directory exists
 bool directoryExists(const std::string& path) {
@@ -1732,9 +1766,17 @@ int main(int argc, char* argv[])
 
                         // Create buffer with triangle weights and hits and write to .txt file
                         std::string output_filename = std::string(getenv("USERPROFILE")) + "\\Desktop\\" + model_name + "_weights.txt";
+                        
                         writeWeightsToFile(state, state.params.h_triangle_weights, state.params.h_triangle_total_hits_count, state.params.h_triangle_not_occluded_hits_count, state.params.scene_triangle_count, output_filename);
                         writeWeightsPerMeshUsingOffsets(state, triangle_offsets, triangle_counts, mesh_names, model_name);
-                        std::cout << "Successfully written out to '" << output_filename << "'." << std::endl << "Exiting...\n" << std::endl;
+                        std::cout << "Successfully written out weights to '" << output_filename << "'." << std::endl;
+
+                        // Store agent positions to file
+                        std::string agent_pos_filename = std::string(getenv("USERPROFILE")) + "\\Desktop\\" + model_name + "_agent_positions.txt";
+
+                        writeAgentPositionsToFile(state.params.agent.agent_positions, state.params.agent.max_steps, agent_pos_filename);
+
+                        std::cout << "Successfully written out agent positions to '" << output_filename << "'." << std::endl << "Exiting...\n" << std::endl;
 
                         return 0;
                     }

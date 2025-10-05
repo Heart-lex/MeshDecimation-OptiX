@@ -149,9 +149,12 @@ struct Agent
     // (Host) relative rotation angles to turn away from obstacles in each of 4 directions (Front, Right, Back, Left)
     float3* h_rotations;
 
+    // Store agent's positions throughout the program's runtime
+    float3* agent_positions;
+
     float fov;
-    int max_steps;
-    int step_count;
+    unsigned int max_steps;
+    unsigned int step_count;
     float march_distance;
     float turn_angle;
 

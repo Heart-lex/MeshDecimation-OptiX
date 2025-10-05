@@ -263,6 +263,10 @@ static void keyCallback(GLFWwindow* window, int32_t key, int32_t /*scancode*/, i
         agent_looping_move = true;
         agent_step_move = false;
     }
+    else if (key == GLFW_KEY_P)
+    {
+        agent_mode = !agent_mode;
+    }
     else if (key == GLFW_KEY_W)
     {
         agent_movement = AGENT_MOVE_FORWARD;
@@ -1674,6 +1678,15 @@ int main(int argc, char* argv[])
                         state.params.accumulate_weights = true;
                     else
                         state.params.accumulate_weights = false;
+
+                    if (agent_mode)
+                    {
+                        state.params.agent_mode = true;
+                    }
+                    else
+                    {
+                        state.params.agent_mode = false;
+                    }
 
                     auto t0 = std::chrono::steady_clock::now();
                     glfwPollEvents();

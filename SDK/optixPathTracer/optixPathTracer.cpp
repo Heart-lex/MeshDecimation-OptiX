@@ -83,7 +83,7 @@ sutil::Trackball trackball;
 int32_t mouse_button = -1;
 
 
-int32_t samples_per_launch = 16;
+int32_t samples_per_launch = 64;
 
 bool weight_accumulation = false;
 bool agent_mode = false;
@@ -535,8 +535,8 @@ void updateCameraState(const PathTracerState& state)
     {
         camera.setEye(state.params.agent.eye_position);
         camera.setDirection(state.params.agent.direction);
-        camera_changed = true;
     }
+    camera_changed = true;
 }
 
 void initAgent(PathTracerState& state)
@@ -551,12 +551,12 @@ void initAgent(PathTracerState& state)
     state.params.agent.direction = normalize(make_float3(-1.0f, 0.0f, 0.0f));
 
     state.params.agent.step_count = 0u;
-    state.params.agent.max_steps = 3000;
-    state.params.agent.march_distance = 0.80f; // 80% of the way to the ray target each step
+    state.params.agent.max_steps = 1000;
+    state.params.agent.march_distance = 0.40f; // 40% of the way to the ray target each step
     state.params.agent.fov = 90.0f;
     state.params.agent_mode = true;
     state.params.agent.find_new_direction = true;
-    state.params.agent.obstacle_threshold_distance = 4.f; // Minimum distance to an obstacle before changing direction
+    state.params.agent.obstacle_threshold_distance = 3.f; // Minimum distance to an obstacle before changing direction
     state.params.agent.previous_maximum_distance_index = 0;
 
     // Allocate space to keep track of agent's positions throughout its runtime
@@ -617,7 +617,7 @@ void agentMoveStep(Agent& agent)
             cos(rad) * new_rotation_angle.x - sin(rad) * new_rotation_angle.z,
             new_rotation_angle.y,
             sin(rad) * new_rotation_angle.x + cos(rad) * new_rotation_angle.z
-        ));
+        ));             
 
         // Update the agent's facing direction (normalized)
         agent.direction = normalize(make_float3(new_dir.x, 0.f, new_dir.z));
@@ -1572,7 +1572,7 @@ int main(int argc, char* argv[])
     //
     // Parse command line options
     //
-    std::string model_filepath = "/ApartmentFloorv2/";
+    std::string model_filepath = "/ApartmentFloor/";
     std::string model_name = "apartment_floor";
     std::string model_extension = ".gltf";
     std::string filename = model_filepath + model_name + model_extension;
@@ -1642,7 +1642,7 @@ int main(int argc, char* argv[])
         createSBT(state, scene);
         initLaunchParams(state, scene);
 
-        std::cout << "Total rays that will be launched: " << state.params.total_rays_launched << std::endl;
+        std::cout << "Total rays per launch instance that will be launched: " << state.params.total_rays_launched << std::endl;
 
         if (outfile.empty())
         {

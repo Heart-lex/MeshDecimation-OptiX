@@ -152,6 +152,8 @@ struct Agent
     // Store agent's positions throughout the program's runtime
     float3* agent_positions;
 
+    float3* agent_directions;
+
     float fov;
     unsigned int max_steps;
     unsigned int step_count;

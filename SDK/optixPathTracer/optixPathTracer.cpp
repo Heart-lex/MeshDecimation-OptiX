@@ -561,6 +561,9 @@ void initAgent(PathTracerState& state)
 
     // Allocate space to keep track of agent's positions throughout its runtime
     CUDA_CHECK(cudaMallocHost(&state.params.agent.agent_positions, state.params.agent.max_steps * sizeof(float3)));
+
+    CUDA_CHECK(cudaMallocHost(&state.params.agent.agent_directions, state.params.agent.max_steps * sizeof(float3)));
+
 }
 
 
@@ -693,6 +696,7 @@ void updateAgentState(PathTracerState& state)
     {
         agentMoveStep(state.params.agent);
         state.params.agent.agent_positions[state.params.agent.step_count] = state.params.agent.position; // Keep track of agent position each step
+        state.params.agent.agent_directions[state.params.agent.step_count] = state.params.agent.direction; // Keep track of agent position each step
         state.params.agent.eye_position += state.params.agent.direction * state.params.agent.march_distance;
         state.params.agent.step_count++;
         camera_changed = true;
@@ -857,7 +861,7 @@ void writeWeightsToFile(PathTracerState state, float* triangle_weights, const un
 }
 
 
-void writeAgentPositionsToFile(float3* agent_positions, const unsigned long max_step_count, const std::string& filepath)
+void writeAgentPositionsToFile(float3* agent_positions, float3* agent_directions, const unsigned long max_step_count, const std::string& filepath)
 {
     std::ofstream outFile(filepath);
 
@@ -870,14 +874,16 @@ void writeAgentPositionsToFile(float3* agent_positions, const unsigned long max_
     outFile << std::fixed << std::setprecision(5);
 
     float3 position = make_float3(-1.f, -1.f, -1.f); // Negative so that it's obvious in case something goes wrong
+    float3 direction = make_float3(-1.f, -1.f, -1.f); // Negative so that it's obvious in case something goes wrong
 
     for (size_t i = 0; i < max_step_count; i++)
     {
 
         // Normalize weight by max weight
         position = agent_positions[i];
+		direction = agent_directions[i];
 
-        outFile << position.x << " " << position.y << " " << position.z << std::endl;
+        outFile << position.x << " " << position.y << " " << position.z << " " << direction.x << " " << direction.y << " " << direction.z << std::endl;
     }
 
     outFile.close();
@@ -1787,7 +1793,7 @@ int main(int argc, char* argv[])
                         // Store agent positions to file
                         std::string agent_pos_filename = std::string(getenv("USERPROFILE")) + "\\Desktop\\" + model_name + "_agent_positions.txt";
 
-                        writeAgentPositionsToFile(state.params.agent.agent_positions, state.params.agent.max_steps, agent_pos_filename);
+                        writeAgentPositionsToFile(state.params.agent.agent_positions, state.params.agent.agent_directions, state.params.agent.max_steps, agent_pos_filename);
 
                         std::cout << "Successfully written out agent positions to '" << output_filename << "'." << std::endl << "Exiting...\n" << std::endl;
 

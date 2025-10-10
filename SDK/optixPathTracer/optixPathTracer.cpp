@@ -61,11 +61,6 @@
 #include <iostream>
 #include <sstream>
 #include <string>
- // Define these only in *one* .cc file.
-#define TINYGLTF_IMPLEMENTATION
-#define STB_IMAGE_IMPLEMENTATION
-#define STB_IMAGE_WRITE_IMPLEMENTATION
-#include <tinygltf/tiny_gltf.h>
 #include <sutil/Scene.h>
 #include <regex>
 
@@ -1795,7 +1790,7 @@ int main(int argc, char* argv[])
 
                         writeAgentPositionsToFile(state.params.agent.agent_positions, state.params.agent.agent_directions, state.params.agent.max_steps, agent_pos_filename);
 
-                        std::cout << "Successfully written out agent positions to '" << output_filename << "'." << std::endl << "Exiting...\n" << std::endl;
+                        std::cout << "Successfully written out agent positions to '" << agent_pos_filename << "'." << std::endl << std::endl << "Exiting...\n" << std::endl;
 
                         return 0;
                     }

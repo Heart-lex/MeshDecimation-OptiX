@@ -376,3 +376,5 @@ build*
 # imgui ini file
 imgui.ini
 Uninstall.exe
+/SDK/data/LowerFloor
+/SDK/data/ApartmentFloor

@@ -149,9 +149,14 @@ struct Agent
     // (Host) relative rotation angles to turn away from obstacles in each of 4 directions (Front, Right, Back, Left)
     float3* h_rotations;
 
+    // Store agent's positions throughout the program's runtime
+    float3* agent_positions;
+
+    float3* agent_directions;
+
     float fov;
-    int max_steps;
-    int step_count;
+    unsigned int max_steps;
+    unsigned int step_count;
     float march_distance;
     float turn_angle;
 
@@ -170,7 +175,7 @@ struct Params
     unsigned int width;
     unsigned int height;
     unsigned int samples_per_launch;
-    unsigned int scene_triangle_count;
+    unsigned long scene_triangle_count;
 
     float3       eye;
     float3       U;
@@ -178,11 +183,17 @@ struct Params
     float3       W;
     
 	float* d_triangle_weights; // (Device) one float weight per triangle in the scene   
-	unsigned int* d_triangle_hits_count; // (Device) one int count per triangle in the scene
+	
+    unsigned long* d_triangle_not_occluded_hits_count; // (Device) Hits that were not occluded - one int count per triangle in the scene
+    unsigned long* d_triangle_total_hits_count; // (Device) Total triangle hits (occluded or not) - one int count per triangle in the scene
 
     float* h_triangle_weights; // (Host) one float weight per triangle in the scene   
-    unsigned int* h_triangle_hits_count; // (Host) one int count per triangle in the scene
+    
+    unsigned long* h_triangle_not_occluded_hits_count; // (Host) Hits that were not occluded - one int count per triangle in the scene
+    unsigned long* h_triangle_total_hits_count; // (Host) Hits that were not occluded - one int count per triangle in the scene
 
+	// Total rays launched during the entire rendering process
+	unsigned long total_rays_launched;
 
     ParallelogramLight     light; // TODO: make light list
     OptixTraversableHandle handle;

@@ -31,10 +31,6 @@
 
 #include <glad/glad.h>  // Needs to be included before gl_interop
 
-#define TINYOBJLOADER_IMPLEMENTATION // define this in only *one* .cc
- // Optional. define TINYOBJLOADER_USE_MAPBOX_EARCUT gives robust triangulation. Requires C++11
- //#define TINYOBJLOADER_USE_MAPBOX_EARCUT
-#include "tiny_obj_loader.h"
 #include <cuda_gl_interop.h>
 #include <cuda_runtime.h>
 
@@ -65,13 +61,10 @@
 #include <iostream>
 #include <sstream>
 #include <string>
- // Define these only in *one* .cc file.
-#define TINYGLTF_IMPLEMENTATION
-#define STB_IMAGE_IMPLEMENTATION
-#define STB_IMAGE_WRITE_IMPLEMENTATION
-#include <tinygltf/tiny_gltf.h>
 #include <sutil/Scene.h>
 #include <regex>
+
+#define ROTATION_THETA 3.f
 
 bool resize_dirty = false;
 bool minimized = false;
@@ -85,16 +78,35 @@ sutil::Trackball trackball;
 int32_t mouse_button = -1;
 
 
-int32_t samples_per_launch = 16;
+int32_t samples_per_launch = 64;
 
 bool weight_accumulation = false;
 bool agent_mode = false;
 bool agent_step_move = false;
 bool agent_looping_move = false;
+float max_weight = 0.0f;
+
+enum AgentMovement
+{
+    // Agent movement
+    AGENT_MOVE_FORWARD,         // W keypress
+    AGENT_MOVE_LEFT,            // A keypress
+    AGENT_MOVE_BACKWARD,        // S keypress
+    AGENT_MOVE_RIGHT,           // D keypress
+
+    // Agent rotation
+    AGENT_ROTATE_LEFT,          // Left arrow keypress
+    AGENT_ROTATE_RIGHT,         // Right arrow keypress
+
+    // Do nothing
+    AGENT_IDLE,
+};
+
+AgentMovement agent_movement;
 
 std::vector<std::string> mesh_names;
-std::vector<unsigned int> triangle_offsets;
-std::vector<unsigned int> triangle_counts;
+std::vector<unsigned long> triangle_offsets;
+std::vector<unsigned long> triangle_counts;
 
 //------------------------------------------------------------------------------
 //
@@ -125,7 +137,7 @@ struct PathTracerState
     OptixModule                    ptx_module = 0;
     OptixPipelineCompileOptions    pipeline_compile_options = {};
     OptixPipeline                  pipeline = 0;
-	OptixPipeline				   agent_pipeline = 0;
+    OptixPipeline				   agent_pipeline = 0;
 
     OptixProgramGroup              raygen_prog_group = 0;
     OptixProgramGroup              radiance_miss_group = 0;
@@ -152,7 +164,7 @@ struct PathTracerState
 
 static void mouseButtonCallback(GLFWwindow* window, int button, int action, int mods)
 {
-	// Disable mouse control in agent mode
+    // Disable mouse control in agent mode
     if (agent_mode)
     {
         return;
@@ -225,14 +237,14 @@ static void keyCallback(GLFWwindow* window, int32_t key, int32_t /*scancode*/, i
 {
     if (action == GLFW_PRESS)
     {
-        if (key == GLFW_KEY_Q || key == GLFW_KEY_ESCAPE)
+        if (/*key == GLFW_KEY_Q ||*/ key == GLFW_KEY_ESCAPE)
         {
             glfwSetWindowShouldClose(window, true);
         }
     }
     else if (key == GLFW_KEY_G)
     {
-		// Toggle triange weight accumulation
+        // Toggle triange weight accumulation
         weight_accumulation = !weight_accumulation;
         std::cout << "Triangle weight accumulation " << (weight_accumulation ? "enabled" : "disabled") << std::endl;
     }
@@ -245,6 +257,34 @@ static void keyCallback(GLFWwindow* window, int32_t key, int32_t /*scancode*/, i
     {
         agent_looping_move = true;
         agent_step_move = false;
+    }
+    else if (key == GLFW_KEY_P)
+    {
+        agent_mode = !agent_mode;
+    }
+    else if (key == GLFW_KEY_W)
+    {
+        agent_movement = AGENT_MOVE_FORWARD;
+    }
+    else if (key == GLFW_KEY_A)
+    {
+        agent_movement = AGENT_MOVE_LEFT;
+    }
+    else if (key == GLFW_KEY_S)
+    {
+        agent_movement = AGENT_MOVE_BACKWARD;
+    }
+    else if (key == GLFW_KEY_D)
+    {
+        agent_movement = AGENT_MOVE_RIGHT;
+    }
+    else if (key == GLFW_KEY_LEFT)
+    {
+        agent_movement = AGENT_ROTATE_LEFT;
+    }
+    else if (key == GLFW_KEY_RIGHT)
+    {
+        agent_movement = AGENT_ROTATE_RIGHT;
     }
 }
 
@@ -288,26 +328,48 @@ void initLaunchParams(PathTracerState& state, const sutil::Scene& scene)
         state.params.width * state.params.height * sizeof(float4)
     ));
 
-	// Allocate space for one float weight per triangle in the scene
+    // Allocate space for one float weight per triangle in the scene
     CUDA_CHECK(cudaMalloc(
         reinterpret_cast<void**>(&state.params.d_triangle_weights),
         state.params.scene_triangle_count * sizeof(float)
     ));
 
-    // Allocate space for one integer count per triangle in the scene
+	// Initialize all triangle weights to zero
+    CUDA_CHECK(cudaMemset(
+        reinterpret_cast<void*>(state.params.d_triangle_weights),
+        0.f,
+        state.params.scene_triangle_count * sizeof(float)
+    ));
+
+    // Allocate space for one unsigned long count per triangle in the scene
     CUDA_CHECK(cudaMalloc(
-        reinterpret_cast<void**>(&state.params.d_triangle_hits_count),
-        state.params.scene_triangle_count * sizeof(unsigned int)
+        reinterpret_cast<void**>(&state.params.d_triangle_not_occluded_hits_count),
+        state.params.scene_triangle_count * sizeof(unsigned long)
+    ));
+
+	// Initialize all triangle not occluded hits counts to zero
+    CUDA_CHECK(cudaMemset(
+        reinterpret_cast<void*>(state.params.d_triangle_not_occluded_hits_count),
+        0ul,
+        state.params.scene_triangle_count * sizeof(unsigned long)
+	));
+
+    // Allocate space for one unsigned long count per triangle in the scene
+    CUDA_CHECK(cudaMalloc(
+        reinterpret_cast<void**>(&state.params.d_triangle_total_hits_count),
+        state.params.scene_triangle_count * sizeof(unsigned long)
     ));
 
     CUDA_CHECK(cudaMallocHost(&state.params.h_triangle_weights, state.params.scene_triangle_count * sizeof(float)));
 
-    CUDA_CHECK(cudaMallocHost(&state.params.h_triangle_hits_count, state.params.scene_triangle_count * sizeof(unsigned int)));
+    CUDA_CHECK(cudaMallocHost(&state.params.h_triangle_not_occluded_hits_count, state.params.scene_triangle_count * sizeof(unsigned long)));
+
+    CUDA_CHECK(cudaMallocHost(&state.params.h_triangle_total_hits_count, state.params.scene_triangle_count * sizeof(unsigned long)));
 
     CUDA_CHECK(cudaMalloc(
         reinterpret_cast<void**>(&state.params.agent.d_distances),
         4 * sizeof(float)
-	));
+    ));
 
     CUDA_CHECK(cudaMalloc(
         reinterpret_cast<void**>(&state.params.agent.d_rotations),
@@ -318,7 +380,10 @@ void initLaunchParams(PathTracerState& state, const sutil::Scene& scene)
 
     CUDA_CHECK(cudaMallocHost(&state.params.agent.h_rotations, 4 * sizeof(float3)));
 
-    state.params.accumulate_weights = true;
+    state.params.accumulate_weights = false;
+
+    // Calculate the total number of rays that will be launched during the entire rendering process
+    state.params.total_rays_launched = state.params.width * state.params.height * samples_per_launch;
 
     weight_accumulation = state.params.accumulate_weights;
 
@@ -327,6 +392,7 @@ void initLaunchParams(PathTracerState& state, const sutil::Scene& scene)
     state.params.samples_per_launch = samples_per_launch;
     state.params.subframe_index = 0u;
 
+	// Light params (UNUSED BUT REQUIRED BY CURRENT CUDA IMPLEMENTATION)
     state.params.light.emission = make_float3(15.0f, 15.0f, 5.0f);
     state.params.light.corner = make_float3(343.0f, 548.5f, 227.0f);
     state.params.light.v1 = make_float3(0.0f, 0.0f, 105.0f);
@@ -442,8 +508,8 @@ static void context_log_cb(unsigned int level, const char* tag, const char* mess
 void initCameraState(const sutil::Scene& scene, const PathTracerState& state)
 {
     camera = scene.camera();
-	camera.setEye(state.params.agent.eye_position);
-	//camera.setDirection(state.params.agent.direction);
+    camera.setEye(state.params.agent.eye_position);
+    //camera.setDirection(state.params.agent.direction);
     camera_changed = true;
 
     trackball.setCamera(&camera);
@@ -463,15 +529,15 @@ void updateCameraState(const PathTracerState& state)
     if (state.params.agent_mode)
     {
         camera.setEye(state.params.agent.eye_position);
-		camera.setDirection(state.params.agent.direction);
-        camera_changed = true;
+        camera.setDirection(state.params.agent.direction);
     }
+    camera_changed = true;
 }
 
 void initAgent(PathTracerState& state)
 {
     // Place the agent in the center of the scene
-    state.params.agent.position = make_float3(15.0f, 0.0f, 10.0f);
+    state.params.agent.position = make_float3(0.0f, 0.0f, 0.0f);
 
     // Place the camera slightly above the agent's position
     state.params.agent.eye_position = state.params.agent.position + make_float3(0.0f, 1.5f, 0.0f);
@@ -479,14 +545,20 @@ void initAgent(PathTracerState& state)
     // Have the agent look straight ahead initially
     state.params.agent.direction = normalize(make_float3(-1.0f, 0.0f, 0.0f));
 
-    state.params.agent.step_count = 0;
+    state.params.agent.step_count = 0u;
     state.params.agent.max_steps = 1000;
-    state.params.agent.march_distance = 0.80f; // 80% of the way to the ray target each step
+    state.params.agent.march_distance = 0.40f; // 40% of the way to the ray target each step
     state.params.agent.fov = 90.0f;
     state.params.agent_mode = true;
     state.params.agent.find_new_direction = true;
-	state.params.agent.obstacle_threshold_distance = 5.f; // Minimum distance to an obstacle before changing direction
+    state.params.agent.obstacle_threshold_distance = 3.f; // Minimum distance to an obstacle before changing direction
     state.params.agent.previous_maximum_distance_index = 0;
+
+    // Allocate space to keep track of agent's positions throughout its runtime
+    CUDA_CHECK(cudaMallocHost(&state.params.agent.agent_positions, state.params.agent.max_steps * sizeof(float3)));
+
+    CUDA_CHECK(cudaMallocHost(&state.params.agent.agent_directions, state.params.agent.max_steps * sizeof(float3)));
+
 }
 
 
@@ -518,16 +590,16 @@ void agentMoveStep(Agent& agent)
             }
         }
 
-		agent.find_new_direction = false;
+        agent.find_new_direction = false;
     }
 
 
-    if ( (agent.h_distances[agent.maximum_distance_index] < agent.obstacle_threshold_distance) || (agent.h_distances[agent.previous_maximum_distance_index] < agent.obstacle_threshold_distance))
+    if ((agent.h_distances[agent.maximum_distance_index] < agent.obstacle_threshold_distance) || (agent.h_distances[agent.previous_maximum_distance_index] < agent.obstacle_threshold_distance))
     {
         // Ensure the rotation is only around the Y-axis and is normalized
         float3 new_rotation_angle = normalize(make_float3(agent.direction.x, 0.f, agent.direction.z));
 
-        // Generate a random fraction of 30� rotation
+        // Generate a random fraction of 30  rotation
         unsigned int seed = agent.step_count;
         srand(seed);
 
@@ -543,7 +615,7 @@ void agentMoveStep(Agent& agent)
             cos(rad) * new_rotation_angle.x - sin(rad) * new_rotation_angle.z,
             new_rotation_angle.y,
             sin(rad) * new_rotation_angle.x + cos(rad) * new_rotation_angle.z
-        ));
+        ));             
 
         // Update the agent's facing direction (normalized)
         agent.direction = normalize(make_float3(new_dir.x, 0.f, new_dir.z));
@@ -558,20 +630,233 @@ void agentMoveStep(Agent& agent)
 }
 
 
+void findMaxValue(const float* triangle_weights, size_t scene_triangle_count)
+{
+    if (scene_triangle_count == 0) return;
+
+    for (size_t i = 0; i < scene_triangle_count; ++i)
+    {
+        if (triangle_weights[i] > max_weight)
+        {
+            max_weight = triangle_weights[i];
+        }
+    }
+}
+
+
 void updateAgentState(PathTracerState& state)
 {
+    float3 new_direction;
+
+    switch (agent_movement)
+    {
+    case AGENT_IDLE:
+        break;
+    case AGENT_MOVE_FORWARD:
+        state.params.agent.position += state.params.agent.direction * state.params.agent.march_distance;
+        state.params.agent.eye_position += state.params.agent.direction * state.params.agent.march_distance;
+        break;
+    case AGENT_MOVE_BACKWARD:
+        state.params.agent.position -= state.params.agent.direction * state.params.agent.march_distance;
+        state.params.agent.eye_position -= state.params.agent.direction * state.params.agent.march_distance;
+        break;
+    case AGENT_MOVE_LEFT:
+        state.params.agent.position += normalize(cross(camera.up(), state.params.agent.direction)) * state.params.agent.march_distance;
+        state.params.agent.eye_position += normalize(cross(camera.up(), state.params.agent.direction)) * state.params.agent.march_distance;;
+        break;
+    case AGENT_MOVE_RIGHT:
+        state.params.agent.position -= normalize(cross(camera.up(), state.params.agent.direction)) * state.params.agent.march_distance;
+        state.params.agent.eye_position -= normalize(cross(camera.up(), state.params.agent.direction)) * state.params.agent.march_distance;;
+        break;
+    case AGENT_ROTATE_RIGHT:
+        new_direction.x = state.params.agent.direction.x * cos(ROTATION_THETA * M_PIf / 180.f) - state.params.agent.direction.z * sin(ROTATION_THETA * M_PIf / 180.f);
+        new_direction.z = state.params.agent.direction.x * sin(ROTATION_THETA * M_PIf / 180.f) + state.params.agent.direction.z * cos(ROTATION_THETA * M_PIf / 180.f);
+        new_direction.y = state.params.agent.direction.y; // keep Y unchanged for horizontal rotation
+
+        state.params.agent.direction = normalize(new_direction);
+        break;
+    case AGENT_ROTATE_LEFT:
+        new_direction.x = state.params.agent.direction.x * cos(-ROTATION_THETA * M_PIf / 180.f) - state.params.agent.direction.z * sin(-ROTATION_THETA * M_PIf / 180.f);
+        new_direction.z = state.params.agent.direction.x * sin(-ROTATION_THETA * M_PIf / 180.f) + state.params.agent.direction.z * cos(-ROTATION_THETA * M_PIf / 180.f);
+        new_direction.y = state.params.agent.direction.y; // keep Y unchanged for horizontal rotation
+
+        state.params.agent.direction = normalize(new_direction);
+        break;
+    }
+
+    // Set to idle after every step
+    agent_movement = AGENT_IDLE;
+
     if (state.params.agent_mode && state.params.agent.step_count < state.params.agent.max_steps && (agent_step_move || agent_looping_move))
     {
-		agentMoveStep(state.params.agent);
+        agentMoveStep(state.params.agent);
+        state.params.agent.agent_positions[state.params.agent.step_count] = state.params.agent.position; // Keep track of agent position each step
+        state.params.agent.agent_directions[state.params.agent.step_count] = state.params.agent.direction; // Keep track of agent position each step
         state.params.agent.eye_position += state.params.agent.direction * state.params.agent.march_distance;
         state.params.agent.step_count++;
         camera_changed = true;
+        weight_accumulation = true;
     }
 
     agent_step_move = false;
 }
 
-void writeWeightsToFile(const float* triangle_weights, const unsigned int* triangle_hit_counts, const unsigned int scene_triangle_count, const std::string& filepath)
+
+void normalizeWeights(float* weights, int num_triangles, float target_min = 0.1f, float target_max = 10.0f)
+{
+    // Find current min and max
+    float min_weight = FLT_MAX;
+    float max_weight = -FLT_MAX;
+
+    for (int i = 0; i < num_triangles; i++) {
+        if (weights[i] > 0.0f) {
+            min_weight = fminf(min_weight, weights[i]);
+            max_weight = fmaxf(max_weight, weights[i]);
+        }
+    }
+
+    if (max_weight <= min_weight) return;
+
+    float range = max_weight - min_weight;
+    float target_range = target_max - target_min;
+
+    // Normalize: ((value - min) / range) * target_range + target_min
+    for (int i = 0; i < num_triangles; i++) {
+        if (weights[i] > 0.0f) {
+            float normalized = (weights[i] - min_weight) / range;
+            weights[i] = target_min + normalized * target_range;
+        }
+    }
+}
+
+
+// Helper function to find median
+float findMedian(float* values, size_t count)
+{
+    // Simple selection for median (you might want to use std::nth_element)
+    std::vector<float> sorted_values(values, values + count);
+    std::sort(sorted_values.begin(), sorted_values.end());
+
+    if (count % 2 == 0) {
+        return (sorted_values[count / 2 - 1] + sorted_values[count / 2]) * 0.5f;
+    }
+    else {
+        return sorted_values[count / 2];
+    }
+}
+
+
+// Robust standardization using median and MAD
+void robustStandardizeWeights(float* weights, int num_triangles)
+{
+    // Collect valid weights
+    std::vector<float> valid_weights;
+    for (int i = 0; i < num_triangles; i++) {
+        if (weights[i] > 0.0f) {
+            valid_weights.push_back(weights[i]);
+        }
+    }
+
+    if (valid_weights.size() <= 1) return;
+
+    // Calculate median
+    float median = findMedian(valid_weights.data(), valid_weights.size());
+
+    // Calculate MAD (Median Absolute Deviation)
+    std::vector<float> deviations;
+    for (float w : valid_weights) {
+        deviations.push_back(fabsf(w - median));
+    }
+    float mad = findMedian(deviations.data(), deviations.size());
+
+    if (mad < 1e-6f) return;
+
+    // Robust standardization: (value - median) / (1.4826 * MAD)
+    float scale_factor = 1.4826f * mad;  // Makes it comparable to std dev
+
+    for (int i = 0; i < num_triangles; i++) {
+        if (weights[i] > 0.0f) {
+            weights[i] = (weights[i] - median) / scale_factor;
+        }
+    }
+}
+
+
+// Main function to standardize triangle weights
+void standardizeTriangleWeights(float* weights, int num_triangles)
+{
+    // Cap extreme outliers first
+    const float outlier_threshold = 1000.0f;  // Anything above this is capped
+
+    for (int i = 0; i < num_triangles; i++) {
+        if (weights[i] > outlier_threshold) {
+            weights[i] = outlier_threshold + log1pf(weights[i] - outlier_threshold) * 100.0f;
+        }
+    }
+
+    // Apply robust standardization
+    robustStandardizeWeights(weights, num_triangles);
+
+    // Final normalization to desired range
+    normalizeWeights(weights, num_triangles, 0.1f, 10.0f);
+}
+
+
+//  Ensure all weights are positive after standardization
+void standardizeWeightsPositive(float* weights, int num_triangles) {
+    // Step 1: Apply your current standardization
+    standardizeTriangleWeights(weights, num_triangles);
+
+    // Step 2: Find the minimum value
+    float min_weight = FLT_MAX;
+    for (int i = 0; i < num_triangles; i++) {
+        if (weights[i] != 0.0f) {  // Skip zero weights
+            min_weight = fminf(min_weight, weights[i]);
+        }
+    }
+
+    // Step 3: Shift all values to make minimum = 0.1
+    const float target_min = 0.1f;
+    float shift = target_min - min_weight;
+
+    for (int i = 0; i < num_triangles; i++) {
+        if (weights[i] != 0.0f) {
+            weights[i] += shift;
+        }
+    }
+}
+
+
+void writeWeightsToFile(PathTracerState state, float* triangle_weights, const unsigned long* triangle_total_hits_count, const unsigned long* triangle_not_occluded_hits_count, const unsigned long scene_triangle_count, const std::string& filepath)
+{
+    std::ofstream outFile(filepath);
+
+    if (!outFile.is_open())
+    {
+        std::cerr << "Error: Could not open file " << filepath << " for writing." << std::endl;
+        return;
+    }
+
+    outFile << std::fixed << std::setprecision(16);
+
+    for (size_t i = 0; i < scene_triangle_count; i++)
+    {
+        float value = 0.0;
+
+        //printf("Triangle %zu: Weight = %f, Max Weight: %f\n", i, triangle_weights[i], max_weight);
+
+		// Normalize weight by max weight
+        value = triangle_weights[i] / max_weight;
+
+        outFile << value << std::endl;
+
+    }
+
+    outFile.close();
+}
+
+
+void writeAgentPositionsToFile(float3* agent_positions, float3* agent_directions, const unsigned long max_step_count, const std::string& filepath)
 {
     std::ofstream outFile(filepath);
 
@@ -583,21 +868,42 @@ void writeWeightsToFile(const float* triangle_weights, const unsigned int* trian
 
     outFile << std::fixed << std::setprecision(5);
 
-    // Calculate normalized values and write to file
-    for (size_t i = 0; i < scene_triangle_count; i++)
+    float3 position = make_float3(-1.f, -1.f, -1.f); // Negative so that it's obvious in case something goes wrong
+    float3 direction = make_float3(-1.f, -1.f, -1.f); // Negative so that it's obvious in case something goes wrong
+
+    for (size_t i = 0; i < max_step_count; i++)
     {
-        float normalizedValue = 0.0f;
 
-        // Avoid division by zero
-        if (triangle_hit_counts[i] != 0)
-        {
-            normalizedValue = triangle_weights[i] / static_cast<float>(triangle_hit_counts[i]);
-        }
+        // Normalize weight by max weight
+        position = agent_positions[i];
+		direction = agent_directions[i];
 
-        outFile << normalizedValue << std::endl;
+        outFile << position.x << " " << position.y << " " << position.z << " " << direction.x << " " << direction.y << " " << direction.z << std::endl;
     }
 
     outFile.close();
+}
+
+// Debug function to print weight distribution statistics
+void debugWeightDistribution(float* weights, int num_triangles) {
+    float min_w = FLT_MAX, max_w = -FLT_MAX, sum_w = 0.0f;
+    int valid_count = 0;
+
+    for (int i = 0; i < num_triangles; i++) {
+        if (weights[i] > 0.0f) {
+            min_w = fminf(min_w, weights[i]);
+            max_w = fmaxf(max_w, weights[i]);
+            sum_w += weights[i];
+            valid_count++;
+        }
+    }
+
+    if (valid_count > 0) {
+        float avg_w = sum_w / valid_count;
+        float ratio = (min_w > 0.0f) ? max_w / min_w : 0.0f;
+        printf("Standardized weights: Min=%.3f, Max=%.3f, Avg=%.3f, Ratio=%.1fx\n",
+            min_w, max_w, avg_w, ratio);
+    }
 }
 
 
@@ -753,7 +1059,7 @@ void createProgramGroups(PathTracerState& state)
             1,  // num program groups
             &agent_program_group_options,
             LOG, &LOG_SIZE,
-			&state.agent_hit_group
+            &state.agent_hit_group
         ));
     }
 }
@@ -767,7 +1073,7 @@ void createPipeline(PathTracerState& state)
         state.radiance_miss_group,
         state.radiance_hit_group,
 
-		// Agent programs
+        // Agent programs
         state.agent_raygen_prog_group,
         state.agent_miss_group,
         state.agent_hit_group,
@@ -814,7 +1120,7 @@ void createPipeline(PathTracerState& state)
     OPTIX_CHECK(optixUtilAccumulateStackSizes(state.radiance_miss_group, &stack_sizes, state.pipeline));
     OPTIX_CHECK(optixUtilAccumulateStackSizes(state.radiance_hit_group, &stack_sizes, state.pipeline));
 
-	// Agent pipeline stack sizes
+    // Agent pipeline stack sizes
     OPTIX_CHECK(optixUtilAccumulateStackSizes(state.agent_raygen_prog_group, &stack_sizes, state.agent_pipeline));
     OPTIX_CHECK(optixUtilAccumulateStackSizes(state.agent_miss_group, &stack_sizes, state.agent_pipeline));
     OPTIX_CHECK(optixUtilAccumulateStackSizes(state.agent_hit_group, &stack_sizes, state.agent_pipeline));
@@ -900,7 +1206,7 @@ void createSBT(PathTracerState& state, const sutil::Scene& scene)
         cudaMemcpyHostToDevice
     ));
 
-	// Agent miss record
+    // Agent miss record
     CUdeviceptr  d_agent_miss_records;
     const size_t agent_miss_record_size = sizeof(MissRecord);
     CUDA_CHECK(cudaMalloc(reinterpret_cast<void**>(&d_agent_miss_records), agent_miss_record_size * RAY_TYPE_COUNT));
@@ -915,21 +1221,21 @@ void createSBT(PathTracerState& state, const sutil::Scene& scene)
         cudaMemcpyHostToDevice
     ));
 
-	CUdeviceptr  d_hitgroup_records;
+    CUdeviceptr  d_hitgroup_records;
     CUdeviceptr  d_agent_hitgroup_records;
 
-    state.params.scene_triangle_count = 0u;
-    
-	// Create hitgroup records for each mesh in the scene
+    state.params.scene_triangle_count = 0ul;
+
+    // Create hitgroup records for each mesh in the scene
     std::vector<HitGroupRecord> hitgroup_records;
     std::vector<HitGroupRecord> agent_hitgroup_records;
 
-	// Debug: Store triangle offsets for each mesh part
-	std::vector<unsigned int> triangle_offsets;
-    std::vector<std::string> mesh_names;    
-    
-    // ADD THESE TWO VECTORS:
-    std::vector<unsigned int> triangle_counts;
+    // Debug: Store triangle offsets for each mesh part
+    std::vector<unsigned long> triangle_offsets;
+    std::vector<std::string> mesh_names;
+
+    // Mesh triangle count
+    std::vector<unsigned long> triangle_counts;
 
     unsigned int global_triangle_offset = 0u;
 
@@ -939,9 +1245,9 @@ void createSBT(PathTracerState& state, const sutil::Scene& scene)
         for (size_t i = 0; i < mesh->material_idx.size(); ++i)
         {
             HitGroupRecord rec;
-			HitGroupRecord rec_agent;
-            
-			// Set the SBT record headers
+            HitGroupRecord rec_agent;
+
+            // Set the SBT record headers
             OPTIX_CHECK(optixSbtRecordPackHeader(state.radiance_hit_group, &rec));
             OPTIX_CHECK(optixSbtRecordPackHeader(state.agent_hit_group, &rec_agent));
 
@@ -959,7 +1265,7 @@ void createSBT(PathTracerState& state, const sutil::Scene& scene)
 
             rec_agent.data.geometry_data.setTriangleMesh(triangle_mesh);
             rec_agent.data.material_data = scene.materials()[mesh->material_idx[i]];
-			rec_agent.data.triangle_offset = global_triangle_offset;
+            rec_agent.data.triangle_offset = global_triangle_offset;
 
             // Count mesh triangles and add it to the total number of triangles
             unsigned int current_primitive_triangles = mesh->indices[i].count / 3;
@@ -973,26 +1279,26 @@ void createSBT(PathTracerState& state, const sutil::Scene& scene)
             // Store the offset for debugging
             triangle_offsets.push_back(global_triangle_offset);
 
-			global_triangle_offset += current_primitive_triangles;
+            global_triangle_offset += current_primitive_triangles;
 
             hitgroup_records.push_back(rec);
-			agent_hitgroup_records.push_back(rec_agent);
+            agent_hitgroup_records.push_back(rec_agent);
         }
     }
 
-    ::triangle_offsets = triangle_offsets;  
-    ::triangle_counts = triangle_counts;    
+    ::triangle_offsets = triangle_offsets;
+    ::triangle_counts = triangle_counts;
     ::mesh_names = mesh_names;
 
 
-	std::cout << "Total number of triangles in the scene: " << state.params.scene_triangle_count << std::endl;
+    std::cout << "Total number of triangles in the scene: " << state.params.scene_triangle_count << std::endl;
 
     std::cout << "Number of mesh parts: " << hitgroup_records.size() << std::endl;
 
     // Debug: Print triangle distribution
     for (size_t i = 0; i < triangle_offsets.size(); ++i)
     {
-        std::cout << "Mesh part " << i+1 << " starts at triangle " << triangle_offsets[i] << std::endl;
+        std::cout << "Mesh part " << i + 1 << " starts at triangle " << triangle_offsets[i] << std::endl;
     }
 
     const size_t hitgroup_record_size = sizeof(HitGroupRecord);
@@ -1015,7 +1321,7 @@ void createSBT(PathTracerState& state, const sutil::Scene& scene)
     state.sbt.hitgroupRecordBase = d_hitgroup_records;
     state.sbt.hitgroupRecordStrideInBytes = static_cast<unsigned int>(hitgroup_record_size);
     state.sbt.hitgroupRecordCount = static_cast<unsigned int> (hitgroup_records.size());
-    
+
     CUDA_CHECK(cudaMalloc(
         reinterpret_cast<void**>(&d_agent_hitgroup_records),
         hitgroup_record_size * RAY_TYPE_COUNT * agent_hitgroup_records.size()
@@ -1028,7 +1334,7 @@ void createSBT(PathTracerState& state, const sutil::Scene& scene)
         cudaMemcpyHostToDevice
     ));
 
-	// Agent SBT
+    // Agent SBT
     state.sbtAgent.raygenRecord = d_agent_raygen_record;
     state.sbtAgent.missRecordBase = d_agent_miss_records;
     state.sbtAgent.missRecordStrideInBytes = static_cast<uint32_t>(agent_miss_record_size);
@@ -1077,6 +1383,7 @@ void displayAgentDistances(const float* agent_distances)
     ++total_subframe_count;
 }
 
+
 void cleanupState(PathTracerState& state)
 {
     OPTIX_CHECK(optixPipelineDestroy(state.pipeline));
@@ -1102,6 +1409,7 @@ void cleanupState(PathTracerState& state)
     CUDA_CHECK(cudaFree(reinterpret_cast<void*>(state.params.accum_buffer)));
     CUDA_CHECK(cudaFree(reinterpret_cast<void*>(state.d_params)));
 }
+
 
 std::string sanitizeFilename(const std::string& filename)
 {
@@ -1131,46 +1439,123 @@ std::string sanitizeFilename(const std::string& filename)
 }
 
 
+// Helper function to create directories recursively (C++14 compatible)
+bool createDirectories(const std::string& path) {
+    std::string current_path;
+
+    for (size_t i = 0; i < path.length(); ++i) {
+        if (path[i] == '\\' || path[i] == '/' || i == path.length() - 1) {
+            if (i == path.length() - 1) {
+                current_path = path;
+            }
+            else {
+                current_path = path.substr(0, i);
+            }
+
+            if (!current_path.empty() && current_path.back() != ':') {
+                DWORD attrs = GetFileAttributesA(current_path.c_str());
+                if (attrs == INVALID_FILE_ATTRIBUTES) {
+                    if (!CreateDirectoryA(current_path.c_str(), NULL)) {
+                        DWORD error = GetLastError();
+                        if (error != ERROR_ALREADY_EXISTS) {
+                            return false;
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    return true;
+}
+
+
+// Helper function to check if directory exists
+bool directoryExists(const std::string& path) {
+    DWORD attrs = GetFileAttributesA(path.c_str());
+    return (attrs != INVALID_FILE_ATTRIBUTES &&
+        (attrs & FILE_ATTRIBUTE_DIRECTORY));
+}
+
+
+
 void writeWeightsPerMeshUsingOffsets(
     const PathTracerState& state,
-    const std::vector<unsigned int>& offsets,
-    const std::vector<unsigned int>& counts,
+    const std::vector<unsigned long>& offsets,
+    const std::vector<unsigned long>& mesh_triangle_counts,
     const std::vector<std::string>& names,
     const std::string& model_name,
     const std::string& base_output_path = ""
 ) {
-    // Determine output path
-    std::string output_path = base_output_path.empty() ?
-        std::string(getenv("USERPROFILE")) + "\\Desktop" :
-        base_output_path;
-
-    // Create output directory
-    std::string output_dir = output_path + "\\" + model_name + "_weights\\";
-    std::string command = "mkdir \"" + output_dir + "\" 2>nul";
-    system(command.c_str());
-
-    std::cout << "Exporting mesh weights to: " << output_dir << std::endl;
-
-    // Export weights for each mesh part using offsets
-    for (size_t i = 0; i < offsets.size(); ++i) {
-        std::string sanitized_name = sanitizeFilename(names[i]);
-        std::string filename = output_dir + sanitized_name + "_weights.txt";
-
-        // Extract weights and hit counts for this specific mesh part using offsets
-        const float* mesh_weights = &state.params.h_triangle_weights[offsets[i]];
-        const unsigned int* mesh_hit_counts = &state.params.h_triangle_hits_count[offsets[i]];
-
-        // Use your existing writeWeightsToFile function!
-        writeWeightsToFile(mesh_weights, mesh_hit_counts, counts[i], filename);
-
-        std::cout << "✓ Exported " << counts[i] << " triangle weights for: "
-            << names[i] << " (offset: " << offsets[i] << ")" << std::endl;
+    // Determine base path
+    std::string base_path;
+    if (base_output_path.empty()) {
+        const char* userprofile = getenv("USERPROFILE");
+        if (userprofile != nullptr) {
+            base_path = std::string(userprofile) + "\\Desktop";
+        }
+        else {
+            std::cerr << "Error: Could not get USERPROFILE environment variable" << std::endl;
+            return;
+        }
+    }
+    else {
+        base_path = base_output_path;
     }
 
-    std::cout << "✓ Successfully exported " << offsets.size() << " mesh weight files." << std::endl;
+    std::string model_folder = base_path + "\\" + model_name + "_weights\\";
+    std::string command = "mkdir \"" + model_folder + "\" 2>nul";
+    system(command.c_str());
+
+
+    // Read weights from input file
+    std::string filename = base_path + "\\" + model_name + "_weights.txt";
+    std::cout << "Reading mesh weights from: " << filename << std::endl;
+
+    std::ifstream inFile(filename);
+    if (!inFile.is_open()) {
+        std::cerr << "Error: Could not open file " << filename << std::endl;
+        return;
+    }
+
+    // Load all weights into memory (as doubles!)
+    std::vector<double> all_weights;
+    double weight;
+    while (inFile >> weight) {
+        all_weights.push_back(weight);
+    }
+    inFile.close();
+
+    if (all_weights.size() < state.params.scene_triangle_count) {
+        std::cerr << "Warning: File contains " << all_weights.size()
+            << " weights but scene has "
+            << state.params.scene_triangle_count << " triangles." << std::endl;
+    }
+
+    std::cout << "-- Successfully loaded " << all_weights.size() << " weights from file." << std::endl;
+
+    // Export per mesh into the model folder
+    for (size_t i = 0; i < names.size(); ++i) {
+        unsigned long start = offsets[i];
+        unsigned long end = (i + 1 < offsets.size()) ? offsets[i + 1] : all_weights.size(); // last mesh
+
+        std::string out_filename = model_folder + "\\" + names[i] + "_weights.txt";
+        std::ofstream outFile(out_filename);
+        if (!outFile.is_open()) {
+            std::cerr << "Error: Could not write to " << out_filename << std::endl;
+            continue;
+        }
+
+        outFile << std::fixed << std::setprecision(16);
+
+        for (unsigned long j = start; j < end; ++j) {
+            outFile << all_weights[j] << "\n";
+        }
+
+        outFile.close();
+        std::cout << "Exported " << (end - start) << " weights to " << out_filename << std::endl;
+    }
 }
-
-
 
 //------------------------------------------------------------------------------
 //
@@ -1188,8 +1573,8 @@ int main(int argc, char* argv[])
     //
     // Parse command line options
     //
-    std::string model_filepath = "UnrealLevel/level_enclosed_v2/";
-	std::string model_name = "level_enclosed_v2";
+    std::string model_filepath = "/ApartmentFloor/";
+    std::string model_name = "apartment_floor";
     std::string model_extension = ".gltf";
     std::string filename = model_filepath + model_name + model_extension;
 
@@ -1238,14 +1623,14 @@ int main(int argc, char* argv[])
     {
         sutil::Scene scene;
         sutil::loadScene(infile, scene);
-		//loadObjScene(infile, scene);
+        //loadObjScene(infile, scene);
         scene.finalize(false, RAY_TYPE_COUNT);
 
         OPTIX_CHECK(optixInit()); // Need to initialize function table
         initAgent(state);
         initCameraState(scene, state);
 
-		// Store agent mode in params to determine if mouse control is enabled
+        // Store agent mode in params to determine if mouse control is enabled
         agent_mode = state.params.agent_mode;
 
         //
@@ -1258,6 +1643,7 @@ int main(int argc, char* argv[])
         createSBT(state, scene);
         initLaunchParams(state, scene);
 
+        std::cout << "Total rays per launch instance that will be launched: " << state.params.total_rays_launched << std::endl;
 
         if (outfile.empty())
         {
@@ -1292,7 +1678,16 @@ int main(int argc, char* argv[])
                     if (weight_accumulation)
                         state.params.accumulate_weights = true;
                     else
-						state.params.accumulate_weights = false;
+                        state.params.accumulate_weights = false;
+
+                    if (agent_mode)
+                    {
+                        state.params.agent_mode = true;
+                    }
+                    else
+                    {
+                        state.params.agent_mode = false;
+                    }
 
                     auto t0 = std::chrono::steady_clock::now();
                     glfwPollEvents();
@@ -1303,6 +1698,10 @@ int main(int argc, char* argv[])
                     t0 = t1;
 
                     launchSubframe(output_buffer, state);
+
+                    // Disable accumulation after camera or agent movement
+                    weight_accumulation = false;
+
                     t1 = std::chrono::steady_clock::now();
                     render_time += t1 - t0;
                     t0 = t1;
@@ -1322,7 +1721,7 @@ int main(int argc, char* argv[])
                         reinterpret_cast<void*>(state.params.agent.d_distances),
                         4 * sizeof(float),
                         cudaMemcpyDeviceToHost
-					));
+                    ));
                     CUDA_SYNC_CHECK();
 
                     CUDA_CHECK(cudaMemcpyAsync(
@@ -1331,10 +1730,10 @@ int main(int argc, char* argv[])
                         4 * sizeof(float3),
                         cudaMemcpyDeviceToHost
                     ));
-					CUDA_SYNC_CHECK();
+                    CUDA_SYNC_CHECK();
 
-					updateAgentState(state);
-					updateCameraState(state);
+                    updateAgentState(state);
+                    updateCameraState(state);
 
                     if (state.params.agent.step_count >= state.params.agent.max_steps)
                     {
@@ -1352,31 +1751,46 @@ int main(int argc, char* argv[])
 
                         // Memcpy for hit counts
                         CUDA_CHECK(cudaMemcpyAsync(
-                            reinterpret_cast<void*>(state.params.h_triangle_hits_count),
-                            reinterpret_cast<void*>(state.params.d_triangle_hits_count),
-                            state.params.scene_triangle_count * sizeof(unsigned int),
+                            reinterpret_cast<void*>(state.params.h_triangle_total_hits_count),
+                            reinterpret_cast<void*>(state.params.d_triangle_total_hits_count),
+                            state.params.scene_triangle_count * sizeof(unsigned long),
                             cudaMemcpyDeviceToHost
                         ));
                         CUDA_SYNC_CHECK();
 
-                        // Export weights per mesh using your existing offset system!
-                        writeWeightsPerMeshUsingOffsets(
-                            state,
-                            triangle_offsets,
-                            triangle_counts,
-                            mesh_names,
-                            model_name
-                        );
+                        // Memcpy for hit counts
+                        CUDA_CHECK(cudaMemcpyAsync(
+                            reinterpret_cast<void*>(state.params.h_triangle_not_occluded_hits_count),
+                            reinterpret_cast<void*>(state.params.d_triangle_not_occluded_hits_count),
+                            state.params.scene_triangle_count * sizeof(unsigned long),
+                            cudaMemcpyDeviceToHost
+                        ));
+                        CUDA_SYNC_CHECK();
 
+                        printf("Before standardization:\n");
+                        debugWeightDistribution(state.params.h_triangle_weights, state.params.scene_triangle_count);
 
+                        // Standardize the weights
+                        standardizeWeightsPositive(state.params.h_triangle_weights, state.params.scene_triangle_count);
 
+                        printf("After standardization:\n");
+                        debugWeightDistribution(state.params.h_triangle_weights, state.params.scene_triangle_count);
 
-                        // Create buffer with triangle weights and hits
-                        // and write to .txt file
+                        findMaxValue(state.params.h_triangle_weights, state.params.scene_triangle_count);
+
+                        // Create buffer with triangle weights and hits and write to .txt file
                         std::string output_filename = std::string(getenv("USERPROFILE")) + "\\Desktop\\" + model_name + "_weights.txt";
-                        writeWeightsToFile(state.params.h_triangle_weights, state.params.h_triangle_hits_count, state.params.scene_triangle_count, output_filename);
+                        
+                        writeWeightsToFile(state, state.params.h_triangle_weights, state.params.h_triangle_total_hits_count, state.params.h_triangle_not_occluded_hits_count, state.params.scene_triangle_count, output_filename);
+                        writeWeightsPerMeshUsingOffsets(state, triangle_offsets, triangle_counts, mesh_names, model_name);
+                        std::cout << "Successfully written out weights to '" << output_filename << "'." << std::endl;
 
-                        std::cout << "Successfully written out to '" << output_filename << "'." << std::endl << "Exiting...\n" << std::endl;
+                        // Store agent positions to file
+                        std::string agent_pos_filename = std::string(getenv("USERPROFILE")) + "\\Desktop\\" + model_name + "_agent_positions.txt";
+
+                        writeAgentPositionsToFile(state.params.agent.agent_positions, state.params.agent.agent_directions, state.params.agent.max_steps, agent_pos_filename);
+
+                        std::cout << "Successfully written out agent positions to '" << agent_pos_filename << "'." << std::endl << std::endl << "Exiting...\n" << std::endl;
 
                         return 0;
                     }

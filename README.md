@@ -13,7 +13,7 @@ C. Chrysafi · A. A. Manetas · Athens, 2025
 
 ## Overview
 
-Traditional mesh decimation treats all regions of a 3D model equally, often destroying visually important features while preserving unseen geometry. This project introduces a **visibility-driven importance mapping** approach that uses GPU-accelerated ray tracing to identify *which parts of a mesh matter perceptually*, then feeds that data into a weighted edge-collapse decimation algorithm.
+Traditional mesh decimation treats all regions of a 3D model equally, often destroying visually important features while preserving unseen geometry. This project introduces a **visibility-driven importance mapping** approach that uses GPU-accelerated ray tracing to identify which parts of a mesh matter perceptually, then feeds that data into a weighted edge-collapse decimation algorithm.
 
 This repository implements **Stage 1 and Stage 2** of the pipeline: ray-based visibility analysis using NVIDIA OptiX, producing a per-triangle importance map that drives the downstream simplification.
 

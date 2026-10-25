@@ -4,6 +4,8 @@
 Department of Informatics, School of Information Sciences & Technology  
 C. Chrysafi · A. A. Manetas · Athens, 2025
 
+📄 **[Read the full thesis](doc/Mesh%20Decimation%20via%20Weighted%20Importance%20Mapping.pdf)**
+
 ---
 
 > **This is the OptiX (visibility analysis) half of the pipeline.**  
@@ -46,14 +48,6 @@ for each pixel:
     trace(ray, RadiancePRD)
 ```
 
-The first prototype scene in Unreal Engine 5, used to validate the export and ray-tracing pipeline:
-
-![UE5 first prototype scene](docs/images/ue5_prototype_scene.jpeg)
-
-And the first successful ray casting test run, highlighting hit triangles in orange:
-
-![First ray casting test](docs/images/ray_casting_test.jpeg)
-
 ### 2. Intersection Recording
 
 Only the **first** intersection per ray is recorded — mirroring how occlusion works in human vision. Each hit is mapped to a global triangle index shared across all meshes in the scene:
@@ -86,11 +80,7 @@ $$w_i = \log(1 + w_d \cdot w_f)$$
 
 A simulated agent traverses the scene autonomously, emulating realistic player movement or pre-recorded camera paths. At each step, four rays are cast in cardinal directions (0°, 90°, 180°, 270°). The agent moves toward the direction of longest unobstructed distance, turning away from blockages when a proximity threshold is met.
 
-Early prototype of the agent walkthrough on UE5's Classic Sponza scene (triangle indexing not yet resolved, hence the colour regions):
-
-![Agent walkthrough on Sponza](docs/images/agent_walkthrough_sponza.png)
-
-Final prototype apartment scene explored by the agent during visibility sampling:
+Early prototype sponza scene explored by the agent during visibility sampling:
 
 ![Final prototype scene](docs/images/final_prototype_ue5.jpeg)
 
@@ -103,17 +93,17 @@ After the ray-tracing pass, triangle weights are copied from GPU to CPU, **stand
 
 The result is visualized as a heatmap — warm colours (yellow/green) indicate high importance, cool colours (blue) indicate low importance — and exported as a plain `.txt` file for the libigl module.
 
-Importance heatmap overlaid on the apartment scene:
-
-![Importance heatmap – apartment](docs/images/heatmap_apartment.jpeg)
-
-First heatmap run in libigl on the prototype scene (statues and benches):
+First heatmap run in libigl on a prototype scene (statues and benches):
 
 ![Importance heatmap – libigl](docs/images/heatmap_libigl_scene.jpeg)
 
 An early weight map on UE5's Classic Sponza (this scene was ultimately discarded due to non-manifold geometry):
 
 ![Sponza weight map](docs/images/sponza_weightmap.jpeg)
+
+Importance heatmap overlaid on the apartment scene:
+
+![Importance heatmap – apartment](docs/images/heatmap_apartment.jpeg)
 
 ---
 
@@ -292,7 +282,7 @@ MeshDecimation-OptiX/
 ## Related Work
 
 - **Xanthopoulos (2021)** — *[Evaluation of Illumination-Based Mesh Simplification](http://graphics.cs.aueb.gr/graphics/docs/Light_driven_mesh_simplification.pdf)* — direct predecessor using lighting-driven importance via OptiX + libigl
-- **Liu et al.** — *Seamless: Seam erasure and seam-aware decoupling of shape from mesh resolution* — seam-aware decimation extending QSlim
+- **Liu et al.** — *[Seamless: Seam erasure and seam-aware decoupling of shape from mesh resolution](https://www.cs.toronto.edu/~jacobson/images/seamless-seam-erasure-and-seam-aware-decoupling-of-shape-from-mesh-resolution-siggraph-asia-2017-compressed-liu-et-al.pdf)* — seam-aware decimation extending QSlim
 - **Lindstrom & Turk (2000)** — *[Image-Driven Simplification](https://faculty.cc.gatech.edu/~turk/my_papers/image_simp_tog2000.pdf)* — multi-view image metric for visibility-aware simplification
 - **Garland & Heckbert (1997)** — *[Surface Simplification Using Quadric Error Metrics](https://www.cs.cmu.edu/~garland/Papers/quadrics.pdf)* — the foundational QSlim edge-collapse algorithm
 
